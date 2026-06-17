@@ -1,0 +1,71 @@
+{
+  "status": "SUCCESS",
+  "dataset": {
+    "n_samples": 40,
+    "n_features": 55
+  },
+  "riasec_model": {
+    "train_accuracy": 1.0,
+    "cv_accuracy_mean": 0.9,
+    "cv_accuracy_std": 0.05,
+    "classes": [
+      "Artistic",
+      "Conventional",
+      "Enterprising",
+      "Investigative",
+      "Social"
+    ],
+    "n_features": 55,
+    "n_samples": 40
+  },
+  "major_model": {
+    "train_accuracy": 1.0,
+    "cv_accuracy_mean": 1.0,
+    "cv_accuracy_std": 0.0,
+    "jurusan_tersedia": [
+      "Administrasi Bisnis",
+      "Administrasi Publik",
+      "Akuntansi",
+      "Animasi",
+      "Arsitektur Interior",
+      "Bimbingan Konseling",
+      "Biologi",
+      "Bisnis Digital",
+      "Bisnis Kreatif",
+      "DKV",
+      "Desain Fashion",
+      "Desain Grafis",
+      "Desain Interior",
+      "Desain Komunikasi Visual",
+      "Desain Produk",
+      "Farmasi",
+      "Ilmu Komunikasi",
+      "Informatika",
+      "Kedokteran",
+      "Kesehatan Masyarakat",
+      "Keuangan",
+      "Logistik",
+      "Manajemen",
+      "Marketing",
+      "Pendidikan Guru",
+      "Pendidikan Seni",
+      "Perpajakan",
+      "Psikologi",
+      "Sastra Indonesia",
+      "Sastra Inggris",
+      "Sejarah",
+      "Sejarah Seni",
+      "Seni Kaligrafi",
+      "Seni Rupa",
+      "Sistem Informasi",
+      "Statistika",
+      "Teknik Informatika"
+    ],
+    "n_jurusan": 37
+  },
+  "saved_files": {
+    "riasec": "models\\riasec_model.pkl",
+    "major": "models\\major_model.pkl",
+    "meta": "models\\feature_meta.json"
+  }
+}
