@@ -1,211 +1,185 @@
 """
 =============================================================
-MODUL: schemas.py
+MODUL: schemas.py  (Dataset Real v2)
 =============================================================
-TUJUAN:
-  Mendefinisikan struktur data (Pydantic models) untuk
-  request dan response API.
+Pydantic schemas untuk request dan response FastAPI.
 
-  Pydantic otomatis memvalidasi tipe data, sehingga jika
-  web dev mengirim nilai yang salah, API langsung memberi
-  pesan error yang jelas.
+REQUEST  : PredictRequest (multipart form + JSON body)
+RESPONSE : PredictResponse
+
+Nilai akademik menggunakan nama pendek (mat_s4, fis_s4, dll)
+agar mudah dikirim dari Laravel.
 =============================================================
 """
 
-from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
+from pydantic import BaseModel, Field, field_validator
 
 
-# ------------------------------------------------------------------
-# REQUEST: Data Akademik (nilai pelajaran)
-# ------------------------------------------------------------------
+# ===========================================================
+# REQUEST
+# ===========================================================
+
 class AkademikInput(BaseModel):
     """
-    Nilai rapor akademik siswa (semua opsional, default = rata-rata).
-    Nilai range: 0–100
+    Nilai akademik 14 mata pelajaran (Semester 4 dan 5).
+    Semua opsional — nilai 0 / None dianggap 'tidak ambil pelajaran ini'.
     """
-    agama:             Optional[float] = Field(None, ge=0, le=100, description="Nilai Agama")
-    pancasila:         Optional[float] = Field(None, ge=0, le=100, description="Nilai Pancasila/PKN")
-    bahasa_indonesia:  Optional[float] = Field(None, ge=0, le=100, description="Nilai Bahasa Indonesia")
-    matematika:        Optional[float] = Field(None, ge=0, le=100, description="Nilai Matematika")
-    ipa:               Optional[float] = Field(None, ge=0, le=100, description="Nilai IPA")
-    ips:               Optional[float] = Field(None, ge=0, le=100, description="Nilai IPS")
-    bahasa_inggris:    Optional[float] = Field(None, ge=0, le=100, description="Nilai Bahasa Inggris")
-    pjok:              Optional[float] = Field(None, ge=0, le=100, description="Nilai PJOK")
-    informatika:       Optional[float] = Field(None, ge=0, le=100, description="Nilai Informatika")
-    seni_budaya:       Optional[float] = Field(None, ge=0, le=100, description="Nilai Seni Budaya")
-    logika:            Optional[float] = Field(None, ge=0, le=100, description="Skor Logika")
-    kreativitas:       Optional[float] = Field(None, ge=0, le=100, description="Skor Kreativitas")
-    komunikasi:        Optional[float] = Field(None, ge=0, le=100, description="Skor Komunikasi")
-    kepemimpinan:      Optional[float] = Field(None, ge=0, le=100, description="Skor Kepemimpinan")
-    problem_solving:   Optional[float] = Field(None, ge=0, le=100, description="Skor Problem Solving")
-    teamwork:          Optional[float] = Field(None, ge=0, le=100, description="Skor Teamwork")
-    literasi:          Optional[float] = Field(None, ge=0, le=100, description="Skor Literasi")
-    numerasi:          Optional[float] = Field(None, ge=0, le=100, description="Skor Numerasi")
+    # Semester 4
+    mat_s4:  Optional[float] = Field(None, ge=0, le=100, description="Matematika Semester 4")
+    fis_s4:  Optional[float] = Field(None, ge=0, le=100, description="Fisika Semester 4")
+    kim_s4:  Optional[float] = Field(None, ge=0, le=100, description="Kimia Semester 4")
+    bio_s4:  Optional[float] = Field(None, ge=0, le=100, description="Biologi Semester 4")
+    bind_s4: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Indonesia Semester 4")
+    bing_s4: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Inggris Semester 4")
+    info_s4: Optional[float] = Field(None, ge=0, le=100, description="Informatika Semester 4")
+
+    # Semester 5
+    mat_s5:  Optional[float] = Field(None, ge=0, le=100, description="Matematika Semester 5")
+    fis_s5:  Optional[float] = Field(None, ge=0, le=100, description="Fisika Semester 5")
+    kim_s5:  Optional[float] = Field(None, ge=0, le=100, description="Kimia Semester 5")
+    bio_s5:  Optional[float] = Field(None, ge=0, le=100, description="Biologi Semester 5")
+    bind_s5: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Indonesia Semester 5")
+    bing_s5: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Inggris Semester 5")
+    info_s5: Optional[float] = Field(None, ge=0, le=100, description="Informatika Semester 5")
 
     def to_dict(self) -> Dict[str, float]:
-        return {k: v for k, v in self.model_dump().items() if v is not None}
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "matematika": 88,
-                "ipa": 85,
-                "bahasa_inggris": 84,
-                "informatika": 90,
-                "logika": 88,
-                "kreativitas": 70,
-            }
-        }
+        d = self.model_dump()
+        return {k: (v if v is not None else 0.0) for k, v in d.items()}
 
 
-# ------------------------------------------------------------------
-# REQUEST: Data Bakat
-# ------------------------------------------------------------------
 class TalentInput(BaseModel):
     """
-    Skor bakat siswa (semua opsional).
-    Nilai range: 1–10
+    Skor Kecerdasan Majemuk Gardner (8 dimensi).
+    Nilai asli dari tes Gardner (biasanya 5–20).
+    Semua opsional — dikosongkan = tidak ada data talent.
     """
-    komunikasi:     Optional[float] = Field(None, ge=1, le=10, description="Kemampuan komunikasi (1-10)")
-    kepemimpinan:   Optional[float] = Field(None, ge=1, le=10, description="Kemampuan memimpin (1-10)")
-    kreativitas:    Optional[float] = Field(None, ge=1, le=10, description="Tingkat kreativitas (1-10)")
-    logika:         Optional[float] = Field(None, ge=1, le=10, description="Kemampuan logika (1-10)")
-    teknologi:      Optional[float] = Field(None, ge=1, le=10, description="Minat & kemampuan teknologi (1-10)")
-    riset:          Optional[float] = Field(None, ge=1, le=10, description="Minat penelitian/riset (1-10)")
-    seni:           Optional[float] = Field(None, ge=1, le=10, description="Minat & bakat seni (1-10)")
-    olahraga:       Optional[float] = Field(None, ge=1, le=10, description="Minat olahraga (1-10)")
-    organisasi:     Optional[float] = Field(None, ge=1, le=10, description="Kemampuan berorganisasi (1-10)")
-    kewirausahaan:  Optional[float] = Field(None, ge=1, le=10, description="Minat kewirausahaan (1-10)")
-    kerja_tim:      Optional[float] = Field(None, ge=1, le=10, description="Kemampuan kerja tim (1-10)")
-    problem_solving: Optional[float] = Field(None, ge=1, le=10, description="Kemampuan pemecahan masalah (1-10)")
+    linguistik:    Optional[float] = Field(None, ge=0, description="Kecerdasan Linguistik (bahasa)")
+    musikal:       Optional[float] = Field(None, ge=0, description="Kecerdasan Musikal")
+    kinestetik:    Optional[float] = Field(None, ge=0, description="Kecerdasan Kinestetik-Tubuh")
+    logika_mat:    Optional[float] = Field(None, ge=0, description="Kecerdasan Logika-Matematika")
+    spasial:       Optional[float] = Field(None, ge=0, description="Kecerdasan Spasial-Visual")
+    interpersonal: Optional[float] = Field(None, ge=0, description="Kecerdasan Interpersonal")
+    intrapersonal: Optional[float] = Field(None, ge=0, description="Kecerdasan Intrapersonal")
+    naturalis:     Optional[float] = Field(None, ge=0, description="Kecerdasan Naturalis")
 
     def to_dict(self) -> Dict[str, float]:
-        return {k: v for k, v in self.model_dump().items() if v is not None}
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "logika": 8,
-                "teknologi": 9,
-                "riset": 8,
-                "problem_solving": 8,
-                "kreativitas": 5,
-            }
-        }
+        d = self.model_dump()
+        return {k: (v if v is not None else 0.0) for k, v in d.items()}
 
 
-# ------------------------------------------------------------------
-# RESPONSE: Karakter Siswa
-# ------------------------------------------------------------------
-class KarakterResponse(BaseModel):
-    """Hasil analisis karakter/kepribadian RIASEC."""
-    tipe: str = Field(description="Tipe RIASEC dominan: Realistic/Investigative/Artistic/Social/Enterprising/Conventional")
-    nama: str = Field(description="Nama karakter dalam bahasa Indonesia")
-    deskripsi: str = Field(description="Deskripsi lengkap karakter siswa")
-    kekuatan: List[str] = Field(description="3 kekuatan utama siswa")
-    warna: str = Field(description="Kode warna untuk UI (hex)")
+# ===========================================================
+# RESPONSE
+# ===========================================================
+
+class FiturTulisan(BaseModel):
+    """10 fitur numerik hasil ekstraksi OpenCV dari gambar tulisan."""
+    letter_size:   float = Field(description="Rata-rata ukuran huruf (1-10)")
+    slant:         float = Field(description="Kemiringan tulisan (1=kiri, 5=tegak, 10=kanan)")
+    pressure:      float = Field(description="Tekanan pena / kegelapan (1-10)")
+    spacing:       float = Field(description="Jarak antar huruf/kata (1-10)")
+    readability:   float = Field(description="Keterbacaan tulisan (1-10)")
+    neatness:      float = Field(description="Kerapian / konsistensi baseline (1-10)")
+    connectivity:  float = Field(description="Sambungan antar huruf / cursive (1-10)")
+    ornament:      float = Field(description="Dekorasi / hiasan tambahan (1-10)")
+    baseline:      float = Field(description="Kelurusan baris tulisan (1-10)")
+    density:       float = Field(description="Kepadatan tinta di halaman (1-10)")
 
 
-# ------------------------------------------------------------------
-# RESPONSE: Rekomendasi Jurusan
-# ------------------------------------------------------------------
-class JurusanResponse(BaseModel):
-    """Satu jurusan yang direkomendasikan."""
-    rank: int = Field(description="Peringkat rekomendasi (1 = terbaik)")
-    jurusan: str = Field(description="Nama jurusan kuliah")
-    match_score: float = Field(description="Persentase kecocokan (0–100)")
-    alasan: str = Field(description="Alasan mengapa jurusan ini cocok untuk siswa")
+class BigFiveInfo(BaseModel):
+    """Profil kepribadian Big Five dari tulisan tangan."""
+    dominant:     str   = Field(description="Tipe Big Five dominan")
+    skor:         Dict[str, float] = Field(description="Skor per dimensi Big Five (1-10)")
+    probabilitas: Dict[str, float] = Field(description="Probabilitas prediksi model (0-100%)")
 
 
-# ------------------------------------------------------------------
-# RESPONSE: Fitur Tulisan Tangan
-# ------------------------------------------------------------------
-class FiturTulisanResponse(BaseModel):
-    """Fitur numerik yang diekstrak dari gambar tulisan tangan."""
-    letter_size_score:  float = Field(description="Ukuran huruf (1-10, besar=tinggi)")
-    slant_angle:        float = Field(description="Kemiringan tulisan (1=kiri, 5=tegak, 10=kanan)")
-    pressure_score:     float = Field(description="Tekanan pena (1=ringan, 10=kuat)")
-    spacing_score:      float = Field(description="Jarak antar huruf (1=rapat, 10=renggang)")
-    readability_score:  float = Field(description="Keterbacaan (1=susah dibaca, 10=sangat jelas)")
-    neatness_score:     float = Field(description="Kerapian (1=berantakan, 10=sangat rapi)")
-    connectivity_score: float = Field(description="Konektivitas huruf (1=cetak, 10=cursive penuh)")
-    ornament_score:     float = Field(description="Hiasan/ornamen (1=polos, 10=banyak hiasan)")
-    line_straightness:  float = Field(description="Kelurusan baris (1=naik-turun, 10=lurus)")
-    density_score:      float = Field(description="Kepadatan tinta (1=renggang, 10=padat)")
+class RiasecInfo(BaseModel):
+    """Tipe karakter RIASEC Holland."""
+    dominant:    str            = Field(description="Tipe RIASEC dominan")
+    karakter:    str            = Field(description="Label karakter singkat")
+    deskripsi:   str            = Field(description="Deskripsi lengkap kepribadian")
+    kekuatan:    List[str]      = Field(description="3 kekuatan utama tipe ini")
+    warna:       str            = Field(description="Warna hex representasi tipe")
+    skor:        Dict[str, float] = Field(description="Skor RIASEC per tipe (0-100)")
 
 
-# ------------------------------------------------------------------
-# RESPONSE: Feature Importance
-# ------------------------------------------------------------------
-class FeatureImportanceItem(BaseModel):
-    fitur: str = Field(description="Nama fitur/variabel")
-    importance: float = Field(description="Tingkat pengaruh (0–1)")
+class AnalisisAkademik(BaseModel):
+    """Hasil analisis nilai akademik."""
+    rumpun_ilmu:          str            = Field(description="Rumpun Ilmu yang diprediksi")
+    rumpun_probabilitas:  Dict[str, float] = Field(description="Probabilitas per Rumpun Ilmu (%)")
+    nilai_rata_rata:      float           = Field(description="Rata-rata nilai akademik")
+    mata_pelajaran_kuat:  List[Dict]      = Field(description="3 mata pelajaran tertinggi")
 
 
-# ------------------------------------------------------------------
-# RESPONSE UTAMA: Hasil Prediksi Lengkap
-# ------------------------------------------------------------------
-class PredictionResponse(BaseModel):
+class RekomendasiJurusan(BaseModel):
+    """Satu rekomendasi program studi."""
+    program_studi:   str   = Field(description="Nama program studi")
+    rumpun_ilmu:     str   = Field(description="Rumpun ilmu program studi ini")
+    alasan:          str   = Field(description="Penjelasan mengapa cocok untuk siswa ini")
+    skor_kesesuaian: float = Field(description="Skor kesesuaian keseluruhan (1.0-5.0)")
+    prediksi_ipk:    str   = Field(description="Estimasi rentang IPK awal (misal '3.2 - 3.6')")
+
+
+class PredictResponse(BaseModel):
     """
-    Respons lengkap API prediksi tulisan tangan.
-    Ini adalah yang diterima oleh web developer Laravel.
+    Response lengkap API prediksi tulisan tangan.
+
+    Struktur:
+      profil_karakter      → Big Five + RIASEC dari tulisan
+      analisis_akademik    → Rumpun Ilmu + nilai akademik
+      rekomendasi_jurusan  → TOP-3 Program Studi
+      fitur_tulisan        → 10 fitur numerik dari gambar
+      kelengkapan_data     → info field mana yang diisi/default
     """
-    status: str = Field(default="success", description="Status: success / error")
-    karakter: KarakterResponse = Field(description="Profil karakter/kepribadian siswa")
-    riasec_skor: Dict[str, float] = Field(description="Skor probabilitas tiap tipe RIASEC")
-    rekomendasi_jurusan: List[JurusanResponse] = Field(description="Top-3 jurusan yang direkomendasikan")
-    fitur_tulisan: FiturTulisanResponse = Field(description="Fitur yang diekstrak dari gambar tulisan")
-    feature_importance: List[FeatureImportanceItem] = Field(description="Fitur paling berpengaruh pada prediksi")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "status": "success",
-                "karakter": {
-                    "tipe": "Investigative",
-                    "nama": "Analitis & Ilmiah",
-                    "deskripsi": "Kamu adalah pemikir mendalam yang suka menganalisis...",
-                    "kekuatan": ["Kemampuan analisis kuat", "Berpikir logis", "Rasa ingin tahu tinggi"],
-                    "warna": "#2980B9",
-                },
-                "riasec_skor": {
-                    "Investigative": 0.45,
-                    "Conventional": 0.20,
-                    "Realistic": 0.15,
-                    "Artistic": 0.08,
-                    "Social": 0.07,
-                    "Enterprising": 0.05,
-                },
-                "rekomendasi_jurusan": [
-                    {"rank": 1, "jurusan": "Informatika", "match_score": 87.3, "alasan": "..."},
-                    {"rank": 2, "jurusan": "Statistik", "match_score": 72.1, "alasan": "..."},
-                    {"rank": 3, "jurusan": "Sistem Informasi", "match_score": 65.8, "alasan": "..."},
-                ],
-                "fitur_tulisan": {
-                    "letter_size_score": 4.2,
-                    "slant_angle": 5.1,
-                    "pressure_score": 6.3,
-                    "spacing_score": 4.8,
-                    "readability_score": 7.2,
-                    "neatness_score": 8.1,
-                    "connectivity_score": 3.4,
-                    "ornament_score": 1.2,
-                    "line_straightness": 8.5,
-                    "density_score": 5.0,
-                },
-                "feature_importance": [
-                    {"fitur": "conventional", "importance": 0.1832},
-                    {"fitur": "investigative", "importance": 0.1654},
-                ],
-            }
-        }
+    profil_karakter:     RiasecInfo       = Field(description="Profil karakter RIASEC siswa")
+    big_five:            BigFiveInfo      = Field(description="Profil Big Five dari tulisan tangan")
+    analisis_akademik:   AnalisisAkademik = Field(description="Analisis nilai akademik")
+    rekomendasi_jurusan: List[RekomendasiJurusan] = Field(description="TOP-3 jurusan yang direkomendasikan")
+    fitur_tulisan:       FiturTulisan     = Field(description="10 fitur tulisan tangan (OpenCV)")
+    kelengkapan_data:    Dict[str, str]   = Field(description="Status kelengkapan data input")
 
 
-# ------------------------------------------------------------------
-# RESPONSE: Error
-# ------------------------------------------------------------------
-class ErrorResponse(BaseModel):
-    status: str = "error"
-    message: str
-    detail: Optional[str] = None
+class HealthResponse(BaseModel):
+    status:         str  = Field(description="'ok' jika server berjalan normal")
+    model_loaded:   bool = Field(description="True jika semua model sudah dimuat")
+    version:        str  = Field(default="2.0-dataset-real")
+
+
+# ===========================================================
+# Helper untuk konversi predictor output → PredictResponse
+# ===========================================================
+
+def build_predict_response(raw: dict) -> PredictResponse:
+    """Konversi output dict predictor.predict() ke PredictResponse."""
+    pc   = raw["profil_karakter"]
+    aa   = raw["analisis_akademik"]
+    ft   = raw["fitur_tulisan"]
+    top3 = raw["rekomendasi_jurusan"]
+    kd   = raw["kelengkapan_data"]
+
+    return PredictResponse(
+        profil_karakter=RiasecInfo(
+            dominant   = pc["riasec_dominant"],
+            karakter   = pc["riasec_karakter"],
+            deskripsi  = pc["riasec_deskripsi"],
+            kekuatan   = pc["riasec_kekuatan"],
+            warna      = pc["riasec_warna"],
+            skor       = pc["riasec_skor"],
+        ),
+        big_five=BigFiveInfo(
+            dominant     = pc["big_five_dominant"],
+            skor         = pc["big_five_skor"],
+            probabilitas = pc["big_five_proba"],
+        ),
+        analisis_akademik=AnalisisAkademik(
+            rumpun_ilmu         = aa["rumpun_ilmu"],
+            rumpun_probabilitas = aa["rumpun_proba"],
+            nilai_rata_rata     = aa["nilai_rata_rata"],
+            mata_pelajaran_kuat = aa["mata_pelajaran_kuat"],
+        ),
+        rekomendasi_jurusan=[
+            RekomendasiJurusan(**j) for j in top3
+        ],
+        fitur_tulisan=FiturTulisan(**ft),
+        kelengkapan_data=kd,
+    )

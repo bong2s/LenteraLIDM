@@ -1,71 +1,35 @@
 {
   "status": "SUCCESS",
-  "dataset": {
-    "n_samples": 40,
-    "n_features": 55
-  },
-  "riasec_model": {
-    "train_accuracy": 1.0,
-    "cv_accuracy_mean": 0.9,
-    "cv_accuracy_std": 0.05,
+  "bigfive_model": {
     "classes": [
-      "Artistic",
-      "Conventional",
-      "Enterprising",
-      "Investigative",
-      "Social"
+      "Agreeableness",
+      "Conscientiousness",
+      "Extraversion",
+      "Neuroticism",
+      "Openness"
     ],
-    "n_features": 55,
-    "n_samples": 40
+    "n_samples": 221,
+    "cv_accuracy_mean": 0.4479797979797979,
+    "cv_accuracy_std": 0.05638951652317094,
+    "train_accuracy": 0.9909411915767847
   },
-  "major_model": {
-    "train_accuracy": 1.0,
-    "cv_accuracy_mean": 1.0,
-    "cv_accuracy_std": 0.0,
-    "jurusan_tersedia": [
-      "Administrasi Bisnis",
-      "Administrasi Publik",
-      "Akuntansi",
-      "Animasi",
-      "Arsitektur Interior",
-      "Bimbingan Konseling",
-      "Biologi",
-      "Bisnis Digital",
-      "Bisnis Kreatif",
-      "DKV",
-      "Desain Fashion",
-      "Desain Grafis",
-      "Desain Interior",
-      "Desain Komunikasi Visual",
-      "Desain Produk",
-      "Farmasi",
-      "Ilmu Komunikasi",
-      "Informatika",
-      "Kedokteran",
-      "Kesehatan Masyarakat",
-      "Keuangan",
-      "Logistik",
-      "Manajemen",
-      "Marketing",
-      "Pendidikan Guru",
-      "Pendidikan Seni",
-      "Perpajakan",
-      "Psikologi",
-      "Sastra Indonesia",
-      "Sastra Inggris",
-      "Sejarah",
-      "Sejarah Seni",
-      "Seni Kaligrafi",
-      "Seni Rupa",
-      "Sistem Informasi",
-      "Statistika",
-      "Teknik Informatika"
+  "rumpun_model": {
+    "classes": [
+      "Bisnis Manajemen",
+      "Pendidikan",
+      "STEM",
+      "Seni Kreatif",
+      "Sosial Humaniora"
     ],
-    "n_jurusan": 37
+    "n_samples": 140,
+    "cv_accuracy_mean": 0.5357142857142857,
+    "cv_accuracy_std": 0.06776309271789382,
+    "train_accuracy": 1.0
   },
-  "saved_files": {
-    "riasec": "models\\riasec_model.pkl",
-    "major": "models\\major_model.pkl",
-    "meta": "models\\feature_meta.json"
+  "major_programs": 70,
+  "saved": {
+    "bigfive": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\bigfive_model.pkl",
+    "rumpun": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\rumpun_model.pkl",
+    "major": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\major_model.pkl"
   }
 }

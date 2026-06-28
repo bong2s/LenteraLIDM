@@ -1,505 +1,374 @@
 """
 =============================================================
-MODUL: image_processor.py
+MODUL: image_processor.py  (Dataset Real v2)
 =============================================================
-TUJUAN:
-  Mengekstrak fitur numerik dari gambar tulisan tangan
-  menggunakan OpenCV (Computer Vision).
+Mengekstrak fitur numerik dari gambar tulisan tangan menggunakan
+OpenCV, lalu menghitung kecenderungan Big Five dan RIASEC dari
+fitur-fitur tersebut berdasarkan prinsip grafologi.
 
-CARA KERJA SINGKAT:
-  Gambar tulisan tangan → Grayscale → Threshold (binerisasi)
-  → Deteksi kontur & komponen → Hitung 10 fitur numerik
-  → Fitur ini dimasukkan ke model ML
+FITUR YANG DIEKSTRAK (10 fitur OpenCV):
+  1. letter_size   — rata-rata ukuran huruf
+  2. slant         — sudut kemiringan tulisan
+  3. pressure      — tekanan pena (kegelapan piksel)
+  4. spacing       — jarak antar huruf/kata
+  5. readability   — keterbacaan (kompleksitas kontur)
+  6. neatness      — kerapian (konsistensi baseline)
+  7. connectivity  — sambungan huruf (cursive vs cetak)
+  8. ornament      — hiasan/dekorasi
+  9. baseline      — kelurusan baris
+  10. density      — kepadatan tinta
 
-FITUR YANG DIEKSTRAK:
-  1. letter_size_score   — rata-rata ukuran huruf (besar/kecil)
-  2. slant_angle         — sudut kemiringan tulisan
-  3. pressure_score      — tekanan pena (terang/gelap piksel)
-  4. spacing_score       — jarak antar huruf/kata
-  5. readability_score   — keterbacaan (kompleksitas kontur)
-  6. neatness_score      — kerapian (konsistensi baseline)
-  7. connectivity_score  — sambungan huruf (cursive vs cetak)
-  8. ornament_score      — hiasan/dekorasi di tulisan
-  9. line_straightness   — kelurusan baris tulisan
-  10. density_score      — kepadatan tinta di halaman
+OUTPUT TAMBAHAN (dihitung dari 10 fitur di atas):
+  - big_five_scores : {'Openness': 0.7, 'Conscientiousness': 0.6, ...}
+  - big_five_dominant: 'Openness'
+  - riasec_tendency : {'Realistic': 0.3, 'Investigative': 0.7, ...}
 =============================================================
 """
 
 import cv2
 import numpy as np
-from typing import Dict, Optional
 import logging
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------------
+# Grafologi: Mapping fitur tulisan → Big Five
+# ------------------------------------------------------------------
+# Setiap Big Five dihitung sebagai kombinasi berbobot dari fitur gambar
+# Bobot berdasarkan literatur grafologi:
+#   Openness        : ornamen, kemiringan, konektivitas tinggi
+#   Conscientiousness: kerapian, baseline lurus, sedikit ornamen
+#   Extraversion    : huruf besar, tekanan kuat, miring kanan
+#   Agreeableness   : konektivitas tinggi, jarak longgar, tekanan ringan
+#   Neuroticism     : ketidak-konsistenan baseline, tekanan tidak merata
+
+GRAFOLOGI_BIGFIVE_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "Openness": {
+        "ornament": +0.35, "slant": +0.25, "connectivity": +0.20,
+        "spacing": +0.10, "density": +0.10,
+    },
+    "Conscientiousness": {
+        "neatness": +0.35, "baseline": +0.30, "readability": +0.20,
+        "ornament": -0.10, "pressure": +0.05,
+    },
+    "Extraversion": {
+        "letter_size": +0.35, "pressure": +0.30, "slant": +0.20,
+        "spacing": +0.10, "density": +0.05,
+    },
+    "Agreeableness": {
+        "connectivity": +0.35, "spacing": +0.25, "pressure": -0.20,
+        "neatness": +0.10, "readability": +0.10,
+    },
+    "Neuroticism": {
+        "neatness": -0.40, "baseline": -0.30, "readability": -0.20,
+        "ornament": +0.05, "density": +0.05,
+    },
+}
+
+# Big Five → RIASEC dominant mapping (psikologi karier)
+BIGFIVE_TO_RIASEC_DOMINANT: Dict[str, str] = {
+    "Openness":          "Artistic",
+    "Conscientiousness": "Conventional",
+    "Extraversion":      "Enterprising",
+    "Agreeableness":     "Social",
+    "Neuroticism":       "Artistic",
+}
+
+# Big Five → bobot RIASEC (untuk skor probabilitas)
+BIGFIVE_TO_RIASEC_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "Openness": {
+        "Realistic": 0.10, "Investigative": 0.25,
+        "Artistic": 0.35,  "Social": 0.15,
+        "Enterprising": 0.10, "Conventional": 0.05,
+    },
+    "Conscientiousness": {
+        "Realistic": 0.20, "Investigative": 0.15,
+        "Artistic": 0.05,  "Social": 0.10,
+        "Enterprising": 0.15, "Conventional": 0.35,
+    },
+    "Extraversion": {
+        "Realistic": 0.10, "Investigative": 0.05,
+        "Artistic": 0.10,  "Social": 0.25,
+        "Enterprising": 0.40, "Conventional": 0.10,
+    },
+    "Agreeableness": {
+        "Realistic": 0.10, "Investigative": 0.10,
+        "Artistic": 0.15,  "Social": 0.40,
+        "Enterprising": 0.15, "Conventional": 0.10,
+    },
+    "Neuroticism": {
+        "Realistic": 0.05, "Investigative": 0.20,
+        "Artistic": 0.40,  "Social": 0.15,
+        "Enterprising": 0.05, "Conventional": 0.15,
+    },
+}
+
+
 class HandwritingFeatureExtractor:
     """
-    Kelas utama untuk mengekstrak fitur dari gambar tulisan tangan.
+    Ekstrak fitur tulisan tangan dari gambar menggunakan OpenCV.
 
     Cara pakai:
         extractor = HandwritingFeatureExtractor()
-        fitur = extractor.extract(path_gambar)
-        # Hasilnya: dict berisi 10 nilai numerik
+        features  = extractor.extract("path/ke/gambar.jpg")
+        result    = extractor.extract_full("path/ke/gambar.jpg")
+        # result berisi: raw_features, big_five_scores, riasec_tendency
     """
 
-    def __init__(self, target_size: tuple = (512, 512)):
-        """
-        Args:
-            target_size: ukuran resize gambar sebelum diproses
-                         (lebar, tinggi) dalam piksel
-        """
+    def __init__(self, target_size: Tuple[int, int] = (512, 512)):
         self.target_size = target_size
 
     # ------------------------------------------------------------------
-    # FUNGSI UTAMA: extract()
+    # API UTAMA: extract() — 10 fitur numerik
     # ------------------------------------------------------------------
     def extract(self, image_path: str) -> Dict[str, float]:
-        """
-        Baca gambar dari file dan ekstrak semua fitur tulisan tangan.
-
-        Args:
-            image_path: path ke file gambar (.png / .jpg)
-
-        Returns:
-            dict dengan 10 fitur numerik (nilai 0.0 – 10.0)
-        """
-        img = self._load_image(image_path)
+        """Baca gambar dari file dan ekstrak 10 fitur tulisan tangan."""
+        img = self._load(image_path)
         if img is None:
-            logger.warning(f"Gambar tidak bisa dibaca: {image_path}")
-            return self._default_features()
-
-        return self._extract_features(img)
+            return self._defaults()
+        return self._compute_features(img)
 
     def extract_from_bytes(self, image_bytes: bytes) -> Dict[str, float]:
-        """
-        Ekstrak fitur dari bytes gambar (dipakai oleh FastAPI untuk upload).
+        """Ekstrak 10 fitur dari bytes gambar (dipakai FastAPI)."""
+        arr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+        if img is None or img.size == 0:
+            return self._defaults()
+        img = cv2.resize(img, self.target_size)
+        return self._compute_features(img)
 
-        Args:
-            image_bytes: isi file gambar dalam bentuk bytes
+    # ------------------------------------------------------------------
+    # API LENGKAP: extract_full() — fitur + Big Five + RIASEC
+    # ------------------------------------------------------------------
+    def extract_full(self, image_path: str) -> Dict:
+        """
+        Ekstrak fitur gambar LENGKAP: fitur dasar + Big Five + RIASEC.
 
         Returns:
-            dict dengan 10 fitur numerik
+            {
+                'raw_features'  : {'letter_size': 4.2, ...},  # 10 fitur
+                'big_five_scores': {'Openness': 6.8, ...},    # 5 skor (0-10)
+                'big_five_dominant': 'Openness',
+                'riasec_tendency'  : {'Artistic': 0.35, ...}, # 6 skor (sum=1)
+            }
         """
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        img = self._load(image_path)
         if img is None:
-            return self._default_features()
+            return self._full_defaults()
+        return self._compute_full(img)
 
+    def extract_full_from_bytes(self, image_bytes: bytes) -> Dict:
+        """Versi extract_full() yang menerima bytes (untuk FastAPI)."""
+        arr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+        if img is None or img.size == 0:
+            return self._full_defaults()
         img = cv2.resize(img, self.target_size)
-        return self._extract_features(img)
+        return self._compute_full(img)
 
     # ------------------------------------------------------------------
-    # LANGKAH 1: Muat dan siapkan gambar
+    # INTERNAL: Hitung semua fitur + Big Five + RIASEC
     # ------------------------------------------------------------------
-    def _load_image(self, image_path: str) -> Optional[np.ndarray]:
+    def _compute_full(self, gray: np.ndarray) -> Dict:
+        raw = self._compute_features(gray)
+        big5 = self._compute_bigfive(raw)
+        dominant = max(big5, key=big5.get)
+        riasec = self._bigfive_to_riasec(big5)
+        return {
+            "raw_features":     raw,
+            "big_five_scores":  big5,
+            "big_five_dominant": dominant,
+            "riasec_tendency":  riasec,
+        }
+
+    # ------------------------------------------------------------------
+    # FITUR DASAR: 10 fitur OpenCV
+    # ------------------------------------------------------------------
+    def _compute_features(self, gray: np.ndarray) -> Dict[str, float]:
+        binary = self._binarize(gray)
+        raw = {
+            "letter_size":  self._letter_size(binary),
+            "slant":        self._slant(binary),
+            "pressure":     self._pressure(gray),
+            "spacing":      self._spacing(binary),
+            "readability":  self._readability(binary),
+            "neatness":     self._neatness(binary),
+            "connectivity": self._connectivity(binary),
+            "ornament":     self._ornament(binary),
+            "baseline":     self._baseline(binary),
+            "density":      self._density(binary),
+        }
+        return {k: float(np.clip(v, 0.0, 10.0)) for k, v in raw.items()}
+
+    # ------------------------------------------------------------------
+    # BIG FIVE dari fitur tulisan (grafologi)
+    # ------------------------------------------------------------------
+    def _compute_bigfive(self, f: Dict[str, float]) -> Dict[str, float]:
         """
-        Baca gambar → konversi ke grayscale → resize ke ukuran standar.
-        Grayscale mempermudah analisis karena hanya ada 1 channel warna.
+        Hitung 5 skor Big Five dari 10 fitur gambar.
+        Setiap skor dalam rentang 0-10.
         """
-        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        scores: Dict[str, float] = {}
+        for trait, weights in GRAFOLOGI_BIGFIVE_WEIGHTS.items():
+            raw = 5.0  # titik tengah (nilai netral)
+            for feature, w in weights.items():
+                val = f.get(feature, 5.0)
+                raw += w * (val - 5.0)
+            scores[trait] = float(np.clip(raw, 1.0, 10.0))
+        return {k: round(v, 2) for k, v in scores.items()}
+
+    # ------------------------------------------------------------------
+    # RIASEC dari Big Five scores
+    # ------------------------------------------------------------------
+    def _bigfive_to_riasec(self, big5: Dict[str, float]) -> Dict[str, float]:
+        """
+        Konversi skor Big Five ke distribusi probabilitas RIASEC.
+        Output: dict dengan total mendekati 1.0
+        """
+        riasec_raw = {t: 0.0 for t in
+                      ["Realistic","Investigative","Artistic","Social","Enterprising","Conventional"]}
+
+        total_big5 = sum(big5.values()) or 1.0
+        for trait, score in big5.items():
+            weight_normalized = score / total_big5
+            if trait not in BIGFIVE_TO_RIASEC_WEIGHTS:
+                continue
+            for riasec_type, w in BIGFIVE_TO_RIASEC_WEIGHTS[trait].items():
+                riasec_raw[riasec_type] += weight_normalized * w
+
+        total = sum(riasec_raw.values()) or 1.0
+        return {k: round(v / total, 4) for k, v in sorted(riasec_raw.items(),
+                                                            key=lambda x: -x[1])}
+
+    # ------------------------------------------------------------------
+    # 10 Fitur OpenCV (implementasi)
+    # ------------------------------------------------------------------
+    def _load(self, path: str) -> Optional[np.ndarray]:
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if img is None:
+            logger.warning(f"Gambar tidak bisa dibaca: {path}")
             return None
-        img = cv2.resize(img, self.target_size)
-        return img
+        return cv2.resize(img, self.target_size)
 
-    # ------------------------------------------------------------------
-    # LANGKAH 2: Binerisasi (Thresholding)
-    # ------------------------------------------------------------------
     def _binarize(self, gray: np.ndarray) -> np.ndarray:
-        """
-        Ubah gambar grayscale menjadi hitam-putih murni.
-
-        Otsu's thresholding: secara otomatis memilih nilai ambang batas
-        yang memisahkan tinta (hitam) dari kertas (putih).
-
-        Hasilnya: piksel tinta = 255 (putih), latar = 0 (hitam)
-        """
         _, binary = cv2.threshold(
-            gray, 0, 255,
-            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+            gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
         )
         return binary
 
-    # ------------------------------------------------------------------
-    # LANGKAH 3: Ekstrak semua fitur
-    # ------------------------------------------------------------------
-    def _extract_features(self, gray: np.ndarray) -> Dict[str, float]:
-        """
-        Memanggil semua fungsi ekstraksi fitur dan menggabungkan hasilnya.
-        """
-        binary = self._binarize(gray)
-
-        features = {
-            "letter_size_score":  self._compute_letter_size(binary),
-            "slant_angle":        self._compute_slant(binary),
-            "pressure_score":     self._compute_pressure(gray),
-            "spacing_score":      self._compute_spacing(binary),
-            "readability_score":  self._compute_readability(binary),
-            "neatness_score":     self._compute_neatness(binary),
-            "connectivity_score": self._compute_connectivity(binary),
-            "ornament_score":     self._compute_ornament(binary),
-            "line_straightness":  self._compute_line_straightness(binary),
-            "density_score":      self._compute_density(binary),
-        }
-
-        # Normalisasi: semua nilai dijaga di rentang 0–10
-        return {k: float(np.clip(v, 0, 10)) for k, v in features.items()}
-
-    # ------------------------------------------------------------------
-    # FITUR 1: Ukuran Huruf
-    # ------------------------------------------------------------------
-    def _compute_letter_size(self, binary: np.ndarray) -> float:
-        """
-        Hitung rata-rata ukuran huruf menggunakan bounding box kontur.
-
-        Huruf besar → skor tinggi (mendekati 10)
-        Huruf kecil → skor rendah (mendekati 1)
-
-        RIASEC mapping:
-          Skor tinggi → Realistik (tegas, to the point)
-          Skor rendah → Konvensional (teliti, rapi)
-        """
-        contours, _ = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
-            return 5.0
-
-        areas = []
-        for c in contours:
-            area = cv2.contourArea(c)
-            if 20 < area < 5000:  # abaikan noise dan benda sangat besar
-                areas.append(area)
-
+    def _letter_size(self, binary: np.ndarray) -> float:
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        areas = [cv2.contourArea(c) for c in contours if 20 < cv2.contourArea(c) < 5000]
         if not areas:
             return 5.0
+        return float(np.clip(1 + (np.mean(areas) - 20) / (5000 - 20) * 9, 1, 10))
 
-        avg_area = np.mean(areas)
-        # Normalisasi: area 20–5000 → skor 1–10
-        score = 1 + (avg_area - 20) / (5000 - 20) * 9
-        return float(np.clip(score, 1, 10))
-
-    # ------------------------------------------------------------------
-    # FITUR 2: Sudut Kemiringan (Slant)
-    # ------------------------------------------------------------------
-    def _compute_slant(self, binary: np.ndarray) -> float:
-        """
-        Deteksi sudut kemiringan tulisan menggunakan Hough Line Transform.
-
-        Tulisan miring ke kanan → skor tinggi (impulsif, percaya diri)
-        Tulisan tegak → skor tengah (~5)
-        Tulisan miring ke kiri → skor rendah (hati-hati, introspektif)
-
-        Cara kerja Hough Lines:
-          Algoritma mencari garis lurus dalam gambar. Setiap garis tulisan
-          menghasilkan sudut θ. Rata-rata θ = kemiringan dominan.
-        """
+    def _slant(self, binary: np.ndarray) -> float:
         edges = cv2.Canny(binary, 50, 150)
         lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=50)
-
         if lines is None:
             return 5.0
-
         angles = []
-        for line in lines[:30]:  # ambil 30 garis terkuat
+        for line in lines[:30]:
             rho, theta = line[0]
-            angle_deg = np.degrees(theta) - 90
-            if -45 < angle_deg < 45:  # hanya garis vertikal (tulisan)
-                angles.append(angle_deg)
-
+            angle = np.degrees(theta) - 90
+            if -45 < angle < 45:
+                angles.append(angle)
         if not angles:
             return 5.0
+        return float(np.clip(5 + np.mean(angles) / 45 * 4, 1, 10))
 
-        mean_angle = np.mean(angles)
-        # Kemiringan -45 s/d +45 derajat → skor 1–10
-        score = 5 + mean_angle / 45 * 4
-        return float(np.clip(score, 1, 10))
+    def _pressure(self, gray: np.ndarray) -> float:
+        return float(np.clip((255 - np.mean(gray)) / 255 * 10, 0, 10))
 
-    # ------------------------------------------------------------------
-    # FITUR 3: Tekanan Pena (Pressure)
-    # ------------------------------------------------------------------
-    def _compute_pressure(self, gray: np.ndarray) -> float:
-        """
-        Estimasi tekanan pena dari kegelapan piksel tinta.
-
-        Prinsip:
-          Tinta dengan tekanan kuat → piksel lebih gelap (nilai piksel rendah)
-          Tinta ringan → piksel lebih terang (nilai piksel tinggi)
-
-        Kita invert: nilai gelap → skor pressure tinggi
-
-        RIASEC mapping:
-          Tekanan kuat → Enterprising/Realistik (energik, dominan)
-          Tekanan ringan → Investigatif/Artistik (lembut, reflektif)
-        """
-        mean_intensity = np.mean(gray)
-        # 0 (hitam total) → tekanan tinggi, 255 (putih) → tidak ada tinta
-        # Invert: semakin gelap semakin tinggi skornya
-        score = (255 - mean_intensity) / 255 * 10
-        return float(np.clip(score, 0, 10))
-
-    # ------------------------------------------------------------------
-    # FITUR 4: Jarak Antar Huruf (Spacing)
-    # ------------------------------------------------------------------
-    def _compute_spacing(self, binary: np.ndarray) -> float:
-        """
-        Hitung jarak rata-rata antar komponen tulisan (huruf/kata).
-
-        Caranya:
-          1. Temukan semua bounding box kontur
-          2. Urutkan dari kiri ke kanan
-          3. Hitung celah horizontal antar kotak
-
-        Jarak lebar → skor tinggi (kepribadian terbuka, membutuhkan ruang)
-        Jarak sempit → skor rendah (hemat, introvert)
-        """
-        contours, _ = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    def _spacing(self, binary: np.ndarray) -> float:
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        boxes = sorted(
+            [cv2.boundingRect(c) for c in contours if cv2.boundingRect(c)[2] > 5 and cv2.boundingRect(c)[3] > 5],
+            key=lambda b: b[0]
         )
-        if len(contours) < 2:
-            return 5.0
-
-        # Ambil bounding boxes, filter noise
-        boxes = []
-        for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            if w > 5 and h > 5:
-                boxes.append((x, y, w, h))
-
         if len(boxes) < 2:
             return 5.0
+        gaps = [boxes[i+1][0] - (boxes[i][0] + boxes[i][2])
+                for i in range(len(boxes)-1)
+                if 0 < boxes[i+1][0] - (boxes[i][0] + boxes[i][2]) < 200]
+        return float(np.clip(np.mean(gaps) / 100 * 10, 0, 10)) if gaps else 5.0
 
-        # Urutkan berdasarkan posisi x (kiri ke kanan)
-        boxes.sort(key=lambda b: b[0])
-
-        gaps = []
-        for i in range(len(boxes) - 1):
-            right_edge = boxes[i][0] + boxes[i][2]
-            left_next = boxes[i + 1][0]
-            gap = left_next - right_edge
-            if 0 < gap < 200:  # abaikan jarak antar baris
-                gaps.append(gap)
-
-        if not gaps:
-            return 5.0
-
-        avg_gap = np.mean(gaps)
-        # Gap 0–100 piksel → skor 0–10
-        score = avg_gap / 100 * 10
-        return float(np.clip(score, 0, 10))
-
-    # ------------------------------------------------------------------
-    # FITUR 5: Keterbacaan (Readability)
-    # ------------------------------------------------------------------
-    def _compute_readability(self, binary: np.ndarray) -> float:
-        """
-        Estimasi keterbacaan dari complexitas kontur.
-
-        Ide: huruf yang rapi dan terbaca punya kontur yang sederhana
-        (perimeter rendah relatif terhadap area = "sirkularitas" tinggi).
-        Huruf susah dibaca punya kontur rumit/berkelok.
-
-        Rumus: compactness = 4π * area / perimeter²
-        Nilai mendekati 1 = bentuk lingkaran sempurna (sangat rapi)
-        """
-        contours, _ = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
-            return 5.0
-
-        compactness_values = []
+    def _readability(self, binary: np.ndarray) -> float:
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        vals = []
         for c in contours:
             area = cv2.contourArea(c)
-            perimeter = cv2.arcLength(c, True)
-            if area > 30 and perimeter > 0:
-                compactness = (4 * np.pi * area) / (perimeter ** 2)
-                compactness_values.append(compactness)
+            peri = cv2.arcLength(c, True)
+            if area > 30 and peri > 0:
+                vals.append((4 * np.pi * area) / (peri ** 2))
+        return float(np.clip(np.mean(vals) * 10, 0, 10)) if vals else 5.0
 
-        if not compactness_values:
-            return 5.0
-
-        avg_compactness = np.mean(compactness_values)
-        # compactness 0–1 → skor 0–10
-        score = avg_compactness * 10
-        return float(np.clip(score, 0, 10))
-
-    # ------------------------------------------------------------------
-    # FITUR 6: Kerapian / Konsistensi Baseline
-    # ------------------------------------------------------------------
-    def _compute_neatness(self, binary: np.ndarray) -> float:
-        """
-        Hitung kerapian tulisan dari konsistensi posisi vertikal huruf.
-
-        Cara:
-          1. Cari titik bawah tiap kontur (baseline)
-          2. Hitung standar deviasi → variasi tinggi → kurang rapi
-
-        Tulisan rapi → baseline konsisten → skor tinggi
-        Tulisan acak → baseline bervariasi → skor rendah
-        """
-        contours, _ = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
-            return 5.0
-
-        baselines = []
-        for c in contours:
-            _, y, _, h = cv2.boundingRect(c)
-            area = cv2.contourArea(c)
-            if area > 50:
-                baselines.append(y + h)  # titik bawah huruf
-
+    def _neatness(self, binary: np.ndarray) -> float:
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        baselines = [y + h for c in contours
+                     for (_, y, _, h) in [cv2.boundingRect(c)]
+                     if cv2.contourArea(c) > 50]
         if len(baselines) < 3:
             return 5.0
+        return float(np.clip(max(0, 10 - np.std(baselines) / 200 * 10), 0, 10))
 
-        std_dev = np.std(baselines)
-        # Deviasi rendah → sangat rapi (skor 10), deviasi tinggi → tidak rapi
-        # Deviasi maks ~200 piksel untuk gambar 512x512
-        score = max(0, 10 - (std_dev / 200 * 10))
-        return float(np.clip(score, 0, 10))
-
-    # ------------------------------------------------------------------
-    # FITUR 7: Konektivitas (Cursive vs Cetak)
-    # ------------------------------------------------------------------
-    def _compute_connectivity(self, binary: np.ndarray) -> float:
-        """
-        Ukur seberapa tersambung huruf dalam tulisan (cursive vs cetak).
-
-        Cara:
-          Tulisan cursive punya sedikit komponen terpisah (huruf nyambung)
-          Tulisan cetak punya banyak komponen terpisah (huruf lepas)
-
-        Skor tinggi → banyak koneksi = cursive (sosial, ekspresif)
-        Skor rendah → sedikit koneksi = cetak (analitis, terstruktur)
-        """
-        # Gunakan morphological closing untuk menghubungkan huruf yang dekat
+    def _connectivity(self, binary: np.ndarray) -> float:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
         closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-        # Hitung komponen terhubung sebelum dan sesudah closing
-        num_before, _ = cv2.connectedComponents(binary)
-        num_after, _ = cv2.connectedComponents(closed)
-
-        if num_before == 0:
+        n_before, _ = cv2.connectedComponents(binary)
+        n_after,  _ = cv2.connectedComponents(closed)
+        if n_before == 0:
             return 5.0
+        return float(np.clip((1 - n_after / max(n_before, 1)) * 10, 0, 10))
 
-        # Rasio pengurangan komponen = tingkat konektivitas
-        connectivity_ratio = 1 - (num_after / max(num_before, 1))
-        score = connectivity_ratio * 10
-        return float(np.clip(score, 0, 10))
-
-    # ------------------------------------------------------------------
-    # FITUR 8: Hiasan / Ornamen
-    # ------------------------------------------------------------------
-    def _compute_ornament(self, binary: np.ndarray) -> float:
-        """
-        Deteksi elemen dekoratif atau hiasan dalam tulisan.
-
-        Cara: Hitung jumlah "loop" (lubang dalam huruf) menggunakan
-        RETR_CCOMP yang mendeteksi kontur berlevel (luar + dalam).
-        Loop ekstra (selain dari huruf seperti 'o', 'a') dianggap ornamen.
-
-        Skor tinggi → banyak ornamen (kreatif, artistik)
-        Skor rendah → tulisan polos (realistik, konvensional)
-        """
-        # Deteksi semua kontur termasuk yang di dalam (holes)
-        contours_outer, _ = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        contours_all, hierarchy = cv2.findContours(
-            binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        if hierarchy is None or len(contours_outer) == 0:
+    def _ornament(self, binary: np.ndarray) -> float:
+        outer, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        _, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        if hierarchy is None or not outer:
             return 3.0
+        inner = sum(1 for h in hierarchy[0] if h[3] != -1)
+        return float(np.clip(inner / max(len(outer), 1) * 15, 0, 10))
 
-        # Hitung jumlah "inner holes"
-        inner_count = 0
-        for h in hierarchy[0]:
-            if h[3] != -1:  # parent bukan -1 = kontur dalam (hole)
-                inner_count += 1
-
-        outer_count = len(contours_outer)
-        ratio = inner_count / max(outer_count, 1)
-        # Surat normal: 'o','a','e','p' punya 1 hole per huruf
-        # Ratio > 0.3 dianggap banyak ornamen
-        score = min(ratio * 15, 10)
-        return float(np.clip(score, 0, 10))
-
-    # ------------------------------------------------------------------
-    # FITUR 9: Kelurusan Baris
-    # ------------------------------------------------------------------
-    def _compute_line_straightness(self, binary: np.ndarray) -> float:
-        """
-        Ukur seberapa lurus baris tulisan (tidak naik-turun).
-
-        Cara:
-          1. Proyeksikan gambar secara vertikal (hitung jumlah piksel per baris)
-          2. Temukan puncak (baris yang penuh tinta = garis tulisan)
-          3. Ukur konsistensi jarak antar baris
-
-        Baris lurus rapi → skor tinggi (disiplin, terorganisir)
-        Baris naik-turun → skor rendah (spontan, tidak formal)
-        """
-        # Horizontal projection profile
+    def _baseline(self, binary: np.ndarray) -> float:
         h_proj = np.sum(binary, axis=1) / 255
-
-        # Smooth projection
-        kernel = np.ones(5) / 5
-        smoothed = np.convolve(h_proj, kernel, mode='same')
-
-        # Temukan lembah (antar baris)
+        smoothed = np.convolve(h_proj, np.ones(5) / 5, mode="same")
         threshold = np.max(smoothed) * 0.1
         valleys = np.where(smoothed < threshold)[0]
-
         if len(valleys) < 2:
             return 7.0
-
-        # Hitung jarak antar lembah (jarak antar baris)
         diffs = np.diff(valleys)
-        diffs = diffs[diffs > 10]  # abaikan jarak sangat kecil
-
+        diffs = diffs[diffs > 10]
         if len(diffs) < 2:
             return 7.0
+        cv = np.std(diffs) / (np.mean(diffs) + 1e-6)
+        return float(np.clip(10 - cv * 10, 0, 10))
 
-        cv_diffs = np.std(diffs) / (np.mean(diffs) + 1e-6)
-        # Coefficient of variation rendah → baris sangat konsisten
-        score = max(0, 10 - cv_diffs * 10)
-        return float(np.clip(score, 0, 10))
-
-    # ------------------------------------------------------------------
-    # FITUR 10: Kepadatan Tinta (Density)
-    # ------------------------------------------------------------------
-    def _compute_density(self, binary: np.ndarray) -> float:
-        """
-        Hitung persentase area yang tertutup tinta.
-
-        Density tinggi → tulisan padat, banyak isi (intens, terperinci)
-        Density rendah → tulisan renggang, sedikit teks (minimalis, efisien)
-        """
-        ink_pixels = np.sum(binary > 0)
-        total_pixels = binary.size
-        density = ink_pixels / total_pixels
-        score = density * 10 * 2  # ×2 karena tulisan jarang memenuhi >50%
-        return float(np.clip(score, 0, 10))
+    def _density(self, binary: np.ndarray) -> float:
+        return float(np.clip(np.sum(binary > 0) / binary.size * 10 * 2, 0, 10))
 
     # ------------------------------------------------------------------
-    # Default: jika gambar tidak bisa dibaca
+    # Default values
     # ------------------------------------------------------------------
-    def _default_features(self) -> Dict[str, float]:
-        """Kembalikan nilai tengah (5.0) untuk semua fitur jika gambar error."""
+    def _defaults(self) -> Dict[str, float]:
         return {
-            "letter_size_score": 5.0,
-            "slant_angle": 5.0,
-            "pressure_score": 5.0,
-            "spacing_score": 5.0,
-            "readability_score": 5.0,
-            "neatness_score": 5.0,
-            "connectivity_score": 5.0,
-            "ornament_score": 3.0,
-            "line_straightness": 7.0,
-            "density_score": 5.0,
+            "letter_size": 5.0, "slant": 5.0, "pressure": 5.0,
+            "spacing": 5.0, "readability": 5.0, "neatness": 5.0,
+            "connectivity": 5.0, "ornament": 3.0, "baseline": 7.0,
+            "density": 5.0,
+        }
+
+    def _full_defaults(self) -> Dict:
+        raw = self._defaults()
+        return {
+            "raw_features":      raw,
+            "big_five_scores":   {t: 5.0 for t in
+                                  ["Openness","Conscientiousness","Extraversion",
+                                   "Agreeableness","Neuroticism"]},
+            "big_five_dominant": "Conscientiousness",
+            "riasec_tendency":   {t: round(1/6, 4) for t in
+                                  ["Realistic","Investigative","Artistic",
+                                   "Social","Enterprising","Conventional"]},
         }

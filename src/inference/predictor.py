@@ -1,369 +1,333 @@
 """
 =============================================================
-MODUL: predictor.py
+MODUL: predictor.py  (Dataset Real v2)
 =============================================================
-TUJUAN:
-  Kelas utama yang dipanggil oleh FastAPI untuk prediksi lengkap.
+Kelas utama yang dipanggil FastAPI untuk prediksi lengkap.
 
-ALUR:
-  1. Terima gambar + data siswa (nilai boleh tidak lengkap)
+ALUR PREDIKSI:
+  1. Terima bytes gambar + data siswa (nilai boleh tidak lengkap)
   2. Ekstrak 10 fitur gambar via OpenCV
-  3. Petakan fitur gambar ke nama kolom Excel (agar cocok dgn model)
-  4. Hitung kecenderungan RIASEC dari tulisan (grafologi)
-  5. Gabungkan dengan fitur akademik & bakat
-  6. Prediksi RIASEC + rekomendasikan Top-3 jurusan
-  7. Kembalikan hasil terstruktur
+  3. Hitung Big Five scores dari fitur gambar (grafologi)
+  4. Prediksi Big Five dominant → mapping ke RIASEC
+  5. Prediksi Rumpun Ilmu dari nilai akademik
+  6. Hitung RIASEC dari kecerdasan Gardner (opsional)
+  7. Fusi: gabungkan sinyal RIASEC dari gambar + talent
+  8. Rekomendasikan TOP-3 Program Studi
 
-KENAPA ADA 2 SET NAMA FITUR GAMBAR?
-  Saat training, model melihat DUA sumber fitur gambar:
-    a. Kolom dari Dataset_Tulisan.xlsx : letter_size, slant, pressure, ...
-    b. Output image_processor.py       : letter_size_score, slant_angle, ...
-  Saat prediksi, kita harus menyediakan KEDUANYA agar model tidak
-  mendapat nilai 0 (yang menyebabkan semua siswa hasilnya sama).
+OUTPUT API:
+  - profil_karakter: Big Five + RIASEC dominant + deskripsi
+  - rekomendasi_jurusan: TOP-3 Program Studi + alasan + skor
+  - fitur_tulisan: 10 fitur numerik tulisan tangan
+  - kelengkapan_data: field mana yang diisi / default
 =============================================================
 """
 
 import os
 import sys
-import json
-import numpy as np
-import pandas as pd
 import logging
-from typing import Dict, List, Optional, Set
 from pathlib import Path
+from typing import Dict, List, Optional, Any
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.preprocessing.image_processor import HandwritingFeatureExtractor
-from src.models.riasec_classifier import RIASECClassifier
+from src.preprocessing.data_loader import (
+    RIASEC_TYPES, RIASEC_DESCRIPTIONS,
+    BIG_FIVE_TYPES, BIGFIVE_TO_RIASEC,
+    compute_riasec_from_gardner, GARDNER_TO_RIASEC_WEIGHTS,
+)
+from src.models.riasec_classifier import BigFiveClassifier, RumpunClassifier
 from src.models.major_recommender import MajorRecommender
-from src.preprocessing.data_loader import RIASEC_DESCRIPTIONS
 
 logger = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------------
-# Nilai default untuk fitur akademik dan bakat yang tidak diisi
-# ------------------------------------------------------------------
-
-DEFAULT_AKADEMIK: Dict[str, float] = {
-    "agama": 75, "pancasila": 75, "bahasa_indonesia": 75,
-    "matematika": 75, "ipa": 75, "ips": 75, "bahasa_inggris": 75,
-    "pjok": 75, "informatika": 75, "seni_budaya": 75,
-    "logika": 75, "kreativitas": 75, "komunikasi": 75,
-    "kepemimpinan": 75, "problem_solving": 75, "teamwork": 75,
-    "literasi": 75, "numerasi": 75,
-}
-
-DEFAULT_TALENT: Dict[str, float] = {
-    "komunikasi_t": 5, "kepemimpinan_t": 5, "kreativitas_t": 5,
-    "logika_t": 5, "teknologi": 5, "riset": 5, "seni": 5,
-    "olahraga": 5, "organisasi": 5, "kewirausahaan": 5,
-    "kerja_tim": 5, "problem_solving_t": 5,
-}
-
-# Pemetaan nama fitur image_processor → nama kolom Excel di Dataset_Tulisan.xlsx
-# Model dilatih dengan KEDUA nama ini, jadi keduanya harus ada saat prediksi
-IMG_TO_EXCEL_MAP = {
-    "letter_size_score": "letter_size",
-    "slant_angle":       "slant",
-    "pressure_score":    "pressure",
-    "spacing_score":     "spacing",
-    "readability_score": "readability",
-    "neatness_score":    "neatness",
-    "ornament_score":    "ornament",
-    "connectivity_score":"connectivity",
-    "line_straightness": "baseline",
-}
-
-
-class HandwritingPredictor:
+class Predictor:
     """
-    Kelas prediksi end-to-end untuk tulisan tangan siswa.
+    Orkestrator prediksi lengkap analisis tulisan tangan.
 
-    Catatan penting:
-      - Model dilatih dengan 55 fitur dari 3 sumber berbeda.
-      - Fitur gambar hadir dalam DUA nama berbeda (Excel + image_processor).
-      - Kecenderungan RIASEC (realistic, investigative, dll.) dihitung
-        otomatis dari fitur gambar menggunakan prinsip grafologi.
+    Cara pakai:
+        predictor = Predictor()
+        predictor.load_models("models/")
+        result = predictor.predict(
+            image_bytes=<bytes>,
+            academic_scores={...},   # opsional
+            talent_scores={...},     # opsional
+        )
     """
 
     def __init__(self):
-        self.image_extractor = HandwritingFeatureExtractor()
-        self.riasec_clf  = RIASECClassifier()
-        self.major_rec   = MajorRecommender()
-        self.feature_meta: Dict = {}
+        self.extractor  = HandwritingFeatureExtractor()
+        self.bigfive_clf: Optional[BigFiveClassifier] = None
+        self.rumpun_clf:  Optional[RumpunClassifier]  = None
+        self.major_rec:   Optional[MajorRecommender]  = None
         self._models_loaded = False
 
-    # ------------------------------------------------------------------
-    # MUAT MODEL
-    # ------------------------------------------------------------------
-    def load_models(self, model_dir: str = "models") -> bool:
-        try:
-            self.riasec_clf.load(os.path.join(model_dir, "riasec_model.pkl"))
-            self.major_rec.load(os.path.join(model_dir,  "major_model.pkl"))
-            with open(os.path.join(model_dir, "feature_meta.json")) as f:
-                self.feature_meta = json.load(f)
-            self._models_loaded = True
-            logger.info("Semua model berhasil dimuat.")
-            return True
-        except Exception as e:
-            logger.error(f"Gagal memuat model: {e}")
-            self._models_loaded = False
-            return False
+    def load_models(self, model_dir: str = "models") -> None:
+        """Muat semua model dari folder model_dir."""
+        bigfive_path = os.path.join(model_dir, "bigfive_model.pkl")
+        rumpun_path  = os.path.join(model_dir, "rumpun_model.pkl")
+        major_path   = os.path.join(model_dir, "major_model.pkl")
 
-    @property
-    def is_ready(self) -> bool:
-        return self._models_loaded
+        ok = True
+        if os.path.exists(bigfive_path):
+            self.bigfive_clf = BigFiveClassifier.load(bigfive_path)
+        else:
+            logger.warning(f"BigFive model tidak ditemukan: {bigfive_path}")
+            ok = False
+
+        if os.path.exists(rumpun_path):
+            self.rumpun_clf = RumpunClassifier.load(rumpun_path)
+        else:
+            logger.warning(f"Rumpun model tidak ditemukan: {rumpun_path}")
+
+        if os.path.exists(major_path):
+            self.major_rec = MajorRecommender.load(major_path)
+        else:
+            logger.warning(f"Major model tidak ditemukan: {major_path}")
+            self.major_rec = MajorRecommender()
+
+        self._models_loaded = ok
+        status = "✅ siap" if ok else "⚠️ sebagian (jalankan train_and_save.py)"
+        logger.info(f"Model status: {status}")
 
     # ------------------------------------------------------------------
     # PREDIKSI UTAMA
     # ------------------------------------------------------------------
     def predict(
-                self,
+        self,
         image_bytes: bytes,
-        akademik: Optional[Dict[str, float]] = None,
-        talent:   Optional[Dict[str, float]] = None,
-    ) -> Dict:
-        if not self._models_loaded:
-            raise RuntimeError("Model belum dimuat. Panggil load_models() terlebih dahulu.")
-
-        # --- Step 1: Ekstrak 10 fitur dari gambar ---
-        logger.info("Mengekstrak fitur tulisan tangan...")
-        img_features = self.image_extractor.extract_from_bytes(image_bytes)
-
-        # --- Step 2: Petakan ke nama kolom Excel agar cocok dengan model ---
-        # Model dilatih dengan kedua nama (Excel + image_processor), jadi kita isi keduanya
-        excel_features: Dict[str, float] = {}
-        for img_key, excel_key in IMG_TO_EXCEL_MAP.items():
-            excel_features[excel_key] = img_features.get(img_key, 5.0)
-
-        # --- Step 3: Hitung kecenderungan RIASEC dari tulisan (grafologi) ---
-        riasec_tendency = self._compute_riasec_tendency(img_features)
-
-        # --- Step 4: Isi akademik & bakat (default jika tidak diisi) ---
-        akademik_provided = set(akademik.keys()) if akademik else set()
-        talent_provided   = set(talent.keys())   if talent   else set()
-
-        akademik_final = dict(DEFAULT_AKADEMIK)
-        if akademik:
-            akademik_final.update(akademik)
-
-        talent_input = talent or {}
-        rename_map = {
-            "komunikasi": "komunikasi_t", "kepemimpinan": "kepemimpinan_t",
-            "kreativitas": "kreativitas_t", "logika": "logika_t",
-            "problem_solving": "problem_solving_t",
-        }
-        talent_renamed = {rename_map.get(k, k): v for k, v in talent_input.items()}
-        talent_final = dict(DEFAULT_TALENT)
-        talent_final.update(talent_renamed)
-
-        # --- Step 5: Bangun feature dict lengkap (55 fitur seperti saat training) ---
-        feature_dict: Dict[str, float] = {}
-        feature_dict.update(akademik_final)          # 18 fitur akademik
-        feature_dict.update(talent_final)            # 12 fitur bakat
-        feature_dict.update(excel_features)          # 9 fitur gambar (nama Excel)
-        feature_dict.update(riasec_tendency)         # 6 skor RIASEC dari grafologi
-        feature_dict.update(img_features)            # 10 fitur gambar (nama image_processor)
-        # Total = 18 + 12 + 9 + 6 + 10 = 55 fitur ✓
-
-        X = pd.DataFrame([feature_dict])
-
-        # --- Step 6: Prediksi RIASEC ---
-        riasec_type  = self.riasec_clf.predict(X)
-        riasec_proba = self.riasec_clf.predict_proba(X)
-
-        # --- Step 7: Rekomendasikan Top-3 jurusan ---
-        top3_jurusan = self.major_rec.recommend_top3(
-            X,
-            riasec_type=riasec_type,
-            riasec_proba=riasec_proba,
-            akademik_scores=akademik_final,
-        )
-
-        # --- Step 8: Susun kelengkapan data ---
-        kelengkapan = self._buat_info_kelengkapan(akademik_provided, talent_provided)
-
-        # --- Step 9: Susun hasil ---
-        riasec_info = RIASEC_DESCRIPTIONS.get(riasec_type, {})
-        result = {
-            "karakter": {
-                "tipe":      riasec_type,
-                "nama":      riasec_info.get("karakter", riasec_type),
-                "deskripsi": riasec_info.get("deskripsi", ""),
-                "kekuatan":  riasec_info.get("kekuatan", []),
-                "warna":     riasec_info.get("warna", "#666666"),
-            },
-            "riasec_skor":         riasec_proba,
-            "rekomendasi_jurusan": top3_jurusan,
-            "fitur_tulisan":       img_features,
-            "fitur_grafologi":     riasec_tendency,
-            "feature_importance":  self.riasec_clf.get_feature_importance(top_n=5),
-            "kelengkapan_data":    kelengkapan,
-        }
-
-        logger.info(
-            f"Prediksi → RIASEC={riasec_type} | "
-            f"Jurusan={[j['jurusan'] for j in top3_jurusan]} | "
-            f"Grafologi={riasec_tendency}"
-        )
-        return result
-
-    # ------------------------------------------------------------------
-    # GRAFOLOGI: Hitung RIASEC tendency dari fitur tulisan tangan
-    # ------------------------------------------------------------------
-    def _compute_riasec_tendency(self, img: Dict[str, float]) -> Dict[str, float]:
+        academic_scores: Optional[Dict[str, float]] = None,
+        talent_scores:   Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
         """
-        Hitung kecenderungan RIASEC dari fitur tulisan tangan.
-        Berdasarkan prinsip grafologi (ilmu analisis tulisan tangan).
+        Prediksi lengkap dari gambar + data siswa.
 
-        Skala output: 1-10 (sama dengan Dataset_Tulisan.xlsx)
+        Args:
+            image_bytes    : bytes gambar tulisan tangan (jpg/png)
+            academic_scores: nilai akademik 2 semester (opsional)
+                             Keys: mat_s4, fis_s4, kim_s4, bio_s4,
+                                   bind_s4, bing_s4, info_s4,
+                                   mat_s5, fis_s5, kim_s5, bio_s5,
+                                   bind_s5, bing_s5, info_s5
+            talent_scores  : kecerdasan Gardner (opsional)
+                             Keys: linguistik, musikal, kinestetik,
+                                   logika_mat, spasial, interpersonal,
+                                   intrapersonal, naturalis
 
-        Referensi grafologi:
-          Realistic     → tekanan kuat, huruf besar, tulisan padat
-          Investigative → keterbacaan tinggi, rapi, garis lurus
-          Artistic      → banyak ornamen, tulisan miring, kreativitas visual
-          Social        → konektivitas tinggi (cursive), miring kanan, jarak lebar
-          Enterprising  → huruf besar, tekanan kuat, miring kanan (dominan)
-          Conventional  → sangat rapi, baseline konsisten, huruf seragam
+        Returns:
+            dict lengkap hasil analisis (lihat schemas.py)
         """
-        sz  = img.get("letter_size_score",  5.0)   # ukuran huruf
-        sl  = img.get("slant_angle",        5.0)   # kemiringan
-        pr  = img.get("pressure_score",     5.0)   # tekanan pena
-        sp  = img.get("spacing_score",      5.0)   # jarak
-        rd  = img.get("readability_score",  5.0)   # keterbacaan
-        nt  = img.get("neatness_score",     5.0)   # kerapian
-        cn  = img.get("connectivity_score", 5.0)   # konektivitas (cursive)
-        or_ = img.get("ornament_score",     3.0)   # ornamen/hiasan
-        bl  = img.get("line_straightness",  7.0)   # kelurusan baris
-        dn  = img.get("density_score",      5.0)   # kepadatan
+        kelengkapan = {}
 
-        def clamp(val: float) -> float:
-            return float(max(1.0, min(10.0, val)))
+        # --- STEP 1: Nilai akademik ---
+        ac, ac_defaults = self._prepare_academic(academic_scores)
+        kelengkapan["akademik"] = "lengkap" if not ac_defaults else f"default: {ac_defaults}"
 
-        # Realistic: teknis, fisik, tegas
-        # → tekanan kuat + huruf besar + tinta padat + jarak rapat
-        realistic = clamp(
-            pr  * 0.35 +
-            sz  * 0.30 +
-            dn  * 0.20 +
-            (10 - sp) * 0.15
+        # --- STEP 2: Talent Gardner ---
+        talent, talent_defaults = self._prepare_talent(talent_scores)
+        kelengkapan["talent"] = "lengkap" if not talent_defaults else f"default: {talent_defaults}"
+
+        # --- STEP 3: Ekstrak fitur gambar ---
+        try:
+            img_result = self.extractor.extract_full_from_bytes(image_bytes)
+        except Exception as e:
+            logger.error(f"Gagal proses gambar: {e}")
+            img_result = self.extractor._full_defaults()
+
+        raw_features   = img_result["raw_features"]
+        bigfive_scores = img_result["big_five_scores"]     # {'Openness': 7.2, ...}
+        bigfive_dominant = img_result["big_five_dominant"] # 'Openness'
+
+        # --- STEP 4: BigFive dari model (override grafologi jika model ada) ---
+        bigfive_proba = {}
+        if self.bigfive_clf is not None:
+            try:
+                bigfive_dominant = self.bigfive_clf.predict(raw_features)
+                bigfive_proba    = self.bigfive_clf.predict_proba(raw_features)
+                # Perbarui bigfive_scores agar konsisten dengan prediksi model:
+                # Kalikan skor grafologi (0-10) dengan probabilitas model sebagai bobot
+                total_proba = sum(bigfive_proba.values()) or 1.0
+                for trait in bigfive_scores:
+                    model_weight = bigfive_proba.get(trait, 0.0) / total_proba
+                    grafologi_raw = bigfive_scores[trait]
+                    # Blend: 50% dari model weight (dikali 10 supaya skala sama) + 50% grafologi
+                    bigfive_scores[trait] = round(
+                        0.5 * model_weight * 10 + 0.5 * grafologi_raw, 2
+                    )
+                # Pastikan dominant dari model tercermin di scores (dinaikkan)
+                bigfive_scores[bigfive_dominant] = max(
+                    bigfive_scores[bigfive_dominant],
+                    max(bigfive_scores.values()),
+                )
+            except Exception as e:
+                logger.warning(f"BigFive model error, pakai grafologi: {e}")
+
+        # --- STEP 5: RIASEC dari Big Five (sekarang mencerminkan model) ---
+        riasec_from_image = self._bigfive_to_riasec(bigfive_scores)
+
+        # --- STEP 6: RIASEC dari Gardner ---
+        riasec_from_talent: Dict[str, float] = {}
+        if any(v > 0 for v in talent.values()):
+            riasec_from_talent = compute_riasec_from_gardner(talent)
+
+        # --- STEP 7: Fusi RIASEC (gambar 60% + talent 40%) ---
+        riasec_fused = self._fuse_riasec(riasec_from_image, riasec_from_talent)
+        riasec_dominant = max(riasec_fused, key=riasec_fused.get)
+
+        # --- STEP 8: Rumpun Ilmu dari nilai akademik ---
+        rumpun_proba = {}
+        if self.rumpun_clf is not None:
+            try:
+                rumpun_dominant = self.rumpun_clf.predict(ac)
+                rumpun_proba    = self.rumpun_clf.predict_proba(ac)
+            except Exception as e:
+                logger.warning(f"Rumpun model error, pakai heuristik: {e}")
+                rumpun_clf_fallback = RumpunClassifier()
+                rumpun_dominant = rumpun_clf_fallback.heuristic_predict(ac)
+        else:
+            rumpun_clf_fallback = RumpunClassifier()
+            rumpun_dominant = rumpun_clf_fallback.heuristic_predict(ac)
+
+        # --- STEP 9: Rata-rata nilai akademik ---
+        nilai_vals = [v for v in ac.values() if v > 0]
+        avg_nilai = float(np.mean(nilai_vals)) if nilai_vals else 75.0
+
+        # --- STEP 10: Rekomendasi TOP-3 ---
+        if self.major_rec is None:
+            self.major_rec = MajorRecommender()
+
+        top3 = self.major_rec.recommend(
+            riasec_dominant=riasec_dominant,
+            rumpun_ilmu=rumpun_dominant,
+            riasec_proba=riasec_fused,
+            avg_nilai=avg_nilai,
+            top_n=3,
         )
 
-        # Investigative: analitis, teliti, sistematis
-        # → sangat terbaca + rapi + garis lurus + sedikit ornamen
-        investigative = clamp(
-            rd  * 0.35 +
-            nt  * 0.30 +
-            bl  * 0.25 +
-            (10 - or_) * 0.10
-        )
+        # --- STEP 11: Top mata pelajaran ---
+        top_subjects = []
+        if self.rumpun_clf is not None:
+            top_subjects = self.rumpun_clf.get_top_subjects(ac, top_n=3)
 
-        # Artistic: kreatif, ekspresif, imajinatif
-        # → banyak ornamen + sedikit rapi + miring + tersambung
-        artistic = clamp(
-            or_ * 0.40 +
-            (10 - nt) * 0.25 +
-            cn  * 0.20 +
-            sl  * 0.15
-        )
-
-        # Social: hangat, komunikatif, empati
-        # → tulisan sambung (cursive) + sedikit miring kanan + jarak lebar
-        social = clamp(
-            cn  * 0.40 +
-            sl  * 0.25 +
-            sp  * 0.20 +
-            (10 - pr) * 0.15
-        )
-
-        # Enterprising: dominan, percaya diri, pemimpin
-        # → huruf besar + tekanan kuat + miring kanan
-        enterprising = clamp(
-            sz  * 0.35 +
-            pr  * 0.30 +
-            sl  * 0.25 +
-            dn  * 0.10
-        )
-
-        # Conventional: teratur, detail, disiplin
-        # → sangat rapi + garis lurus + terbaca + sedikit ornamen
-        conventional = clamp(
-            nt  * 0.40 +
-            bl  * 0.30 +
-            (10 - or_) * 0.20 +
-            rd  * 0.10
-        )
+        # --- STEP 12: Susun output ---
+        riasec_desc = RIASEC_DESCRIPTIONS.get(riasec_dominant, {})
 
         return {
-            "realistic":     round(realistic,     2),
-            "investigative": round(investigative, 2),
-            "artistic":      round(artistic,      2),
-            "social":        round(social,        2),
-            "enterprising":  round(enterprising,  2),
-            "conventional":  round(conventional,  2),
+            "profil_karakter": {
+                "riasec_dominant":   riasec_dominant,
+                "riasec_karakter":   riasec_desc.get("karakter", ""),
+                "riasec_deskripsi":  riasec_desc.get("deskripsi", ""),
+                "riasec_kekuatan":   riasec_desc.get("kekuatan", []),
+                "riasec_warna":      riasec_desc.get("warna", "#3498DB"),
+                "riasec_skor":       {k: round(v * 100, 1) for k, v in riasec_fused.items()},
+                "big_five_dominant": bigfive_dominant,
+                "big_five_skor":     bigfive_scores,
+                "big_five_proba":    {k: round(v * 100, 1) for k, v in bigfive_proba.items()},
+            },
+            "analisis_akademik": {
+                "rumpun_ilmu":       rumpun_dominant,
+                "rumpun_proba":      {k: round(v * 100, 1) for k, v in rumpun_proba.items()},
+                "nilai_rata_rata":   round(avg_nilai, 1),
+                "mata_pelajaran_kuat": top_subjects,
+            },
+            "rekomendasi_jurusan": top3,
+            "fitur_tulisan": {
+                "letter_size":   round(raw_features.get("letter_size",   5.0), 2),
+                "slant":         round(raw_features.get("slant",         5.0), 2),
+                "pressure":      round(raw_features.get("pressure",      5.0), 2),
+                "spacing":       round(raw_features.get("spacing",       5.0), 2),
+                "readability":   round(raw_features.get("readability",   5.0), 2),
+                "neatness":      round(raw_features.get("neatness",      5.0), 2),
+                "connectivity":  round(raw_features.get("connectivity",  5.0), 2),
+                "ornament":      round(raw_features.get("ornament",      3.0), 2),
+                "baseline":      round(raw_features.get("baseline",      7.0), 2),
+                "density":       round(raw_features.get("density",       5.0), 2),
+            },
+            "kelengkapan_data": kelengkapan,
         }
 
     # ------------------------------------------------------------------
-    # Helper: Info kelengkapan data siswa
+    # Internal helpers
     # ------------------------------------------------------------------
-    def _buat_info_kelengkapan(
+    def _prepare_academic(
+        self, ac: Optional[Dict[str, float]]
+    ) -> tuple[Dict[str, float], List[str]]:
+        """Siapkan nilai akademik dengan default 75 untuk yang kosong."""
+        all_keys = [
+            "mat_s4", "fis_s4", "kim_s4", "bio_s4", "bind_s4", "bing_s4", "info_s4",
+            "mat_s5", "fis_s5", "kim_s5", "bio_s5", "bind_s5", "bing_s5", "info_s5",
+        ]
+        result = {k: 75.0 for k in all_keys}
+        defaults_applied = []
+        if ac:
+            for k in all_keys:
+                if k in ac and ac[k] is not None and ac[k] > 0:
+                    result[k] = float(ac[k])
+                else:
+                    defaults_applied.append(k)
+        else:
+            defaults_applied = all_keys[:]
+        return result, defaults_applied
+
+    def _prepare_talent(
+        self, talent: Optional[Dict[str, float]]
+    ) -> tuple[Dict[str, float], List[str]]:
+        """Siapkan skor Gardner dengan default 10 untuk yang kosong."""
+        all_keys = [
+            "linguistik", "musikal", "kinestetik", "logika_mat",
+            "spasial", "interpersonal", "intrapersonal", "naturalis",
+        ]
+        result = {k: 0.0 for k in all_keys}
+        defaults = []
+        if talent:
+            for k in all_keys:
+                if k in talent and talent[k] is not None:
+                    result[k] = float(talent[k])
+                else:
+                    defaults.append(k)
+        else:
+            defaults = all_keys[:]
+        return result, defaults
+
+    def _bigfive_to_riasec(self, bigfive_scores: Dict[str, float]) -> Dict[str, float]:
+        """Konversi skor Big Five ke distribusi RIASEC."""
+        riasec_raw = {t: 0.0 for t in RIASEC_TYPES}
+        total_bf = sum(bigfive_scores.values()) or 1.0
+
+        for trait, score in bigfive_scores.items():
+            w = score / total_bf
+            if trait not in BIGFIVE_TO_RIASEC:
+                continue
+            for riasec_type, weight in BIGFIVE_TO_RIASEC[trait].items():
+                riasec_raw[riasec_type] += w * weight
+
+        total = sum(riasec_raw.values()) or 1.0
+        return {k: round(v / total, 4) for k, v in riasec_raw.items()}
+
+    def _fuse_riasec(
         self,
-        akademik_provided: Set[str],
-        talent_provided:   Set[str],
-    ) -> Dict:
-        semua_akademik = set(DEFAULT_AKADEMIK.keys())
-        semua_talent   = set(DEFAULT_TALENT.keys())
+        from_image: Dict[str, float],
+        from_talent: Dict[str, float],
+        image_weight: float = 0.60,
+    ) -> Dict[str, float]:
+        """Fusi RIASEC dari gambar (60%) dan talent (40%)."""
+        if not from_talent or all(v == 0 for v in from_talent.values()):
+            return from_image
 
-        akademik_kosong = semua_akademik - akademik_provided
-        talent_kosong   = {k.replace("_t", "") for k in semua_talent - talent_provided}
-        talent_diisi_display = {k.replace("_t", "") for k in talent_provided}
+        all_keys = set(list(from_image.keys()) + list(from_talent.keys()))
+        fused = {}
+        for k in all_keys:
+            fused[k] = (
+                image_weight * from_image.get(k, 0.0) +
+                (1 - image_weight) * from_talent.get(k, 0.0)
+            )
+        total = sum(fused.values()) or 1.0
+        return {k: round(v / total, 4) for k, v in sorted(fused.items(), key=lambda x: -x[1])}
 
-        persen_akademik = round(len(akademik_provided) / len(semua_akademik) * 100)
-        persen_talent   = round(len(talent_provided)   / len(semua_talent)   * 100)
-
-        return {
-            "gambar": {
-                "status": "diisi",
-                "keterangan": "Gambar tulisan tangan berhasil dianalisis",
-            },
-            "akademik": {
-                "diisi":          sorted(akademik_provided),
-                "diisi_otomatis": sorted(akademik_kosong),
-                "default_value":  75,
-                "persen_lengkap": persen_akademik,
-                "keterangan": (
-                    f"{len(akademik_provided)} dari {len(semua_akademik)} mata pelajaran diisi. "
-                    f"{len(akademik_kosong)} diisi otomatis nilai 75."
-                ) if akademik_kosong else "Semua mata pelajaran terisi lengkap.",
-            },
-            "bakat": {
-                "diisi":          sorted(talent_diisi_display),
-                "diisi_otomatis": sorted(talent_kosong),
-                "default_value":  5,
-                "persen_lengkap": persen_talent,
-                "keterangan": (
-                    f"{len(talent_provided)} dari {len(semua_talent)} bakat diisi. "
-                    f"{len(talent_kosong)} diisi otomatis nilai 5."
-                ) if talent_kosong else "Semua bakat terisi lengkap.",
-            },
-            "catatan": (
-                "Prediksi menggunakan analisis tulisan tangan (grafologi) sebagai dasar utama. "
-                "Semakin lengkap data yang diisi, semakin personal rekomendasinya."
-            ),
-        }
-
-    # ------------------------------------------------------------------
-    # PREDIKSI DARI FILE (untuk testing lokal)
-    # ------------------------------------------------------------------
-    def predict_from_file(
-        self,
-        image_path: str,
-        akademik: Optional[Dict] = None,
-        talent:   Optional[Dict] = None,
-    ) -> Dict:
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
-        return self.predict(image_bytes, akademik=akademik, talent=talent)
+    @property
+    def is_ready(self) -> bool:
+        return self._models_loaded

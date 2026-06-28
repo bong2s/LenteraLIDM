@@ -1,50 +1,135 @@
 """
 =============================================================
-MODUL: data_loader.py
+MODUL: data_loader.py  (Dataset Real v2)
 =============================================================
-TUJUAN:
-  Memuat dan menggabungkan 3 dataset (Akademik, Talent, Tulisan)
-  menjadi satu DataFrame yang siap dilatih oleh model ML.
+Dataset baru yang digunakan:
+  1. Dataset_AkademikN.xlsx  — 140 siswa, 14 nilai pelajaran (2 semester)
+     Target: Rumpun Ilmu (5 kategori) + Program Studi
+  2. Dataset_TalentN.xlsx    — Kecerdasan Majemuk Gardner (8 dimensi)
+     Target: Job Profession
+  3. Dataset_TulisanN/       — 221 gambar tulisan tangan
+     Struktur: folder = label Big Five (Openness, Conscientiousness, dll)
 
-ALUR:
-  1. Baca Dataset_Akademik.xlsx   → fitur nilai pelajaran + skill
-  2. Baca Dataset_Talent.xlsx     → fitur bakat
-  3. Baca Dataset_Tulisan.xlsx    → fitur tulisan + skor RIASEC
-  4. Gabungkan berdasarkan sample_id
-  5. Encode label (RIASEC & jurusan) ke angka
+Arsitektur ML:
+  Gambar  → Big Five → RIASEC (mapping psikologi)
+  Akademik → Rumpun Ilmu (5 kategori) + Program Studi
+  Talent  → Gardner MI (8 kecerdasan) → bobot RIASEC
 =============================================================
 """
 
-import pandas as pd
-import numpy as np
 import os
+import re
 import logging
-from typing import Tuple, Dict, List
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Tuple, Optional
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------
-# Konstanta: Daftar jurusan dan karakter RIASEC
-# ------------------------------------------------------------------
 
-RIASEC_TYPES = [
-    "Realistic",      # R - Realistik  : teknis, praktis, fisik
-    "Investigative",  # I - Investigatif: analitis, ilmiah, penasaran
-    "Artistic",       # A - Artistik    : kreatif, ekspresi diri
-    "Social",         # S - Sosial      : membantu, mengajar, empati
-    "Enterprising",   # E - Enterprising: memimpin, wirausaha, persuasif
-    "Conventional",   # C - Konvensional: teratur, detail, administrasi
+# ------------------------------------------------------------------
+# Big Five Personality (OCEAN)
+# ------------------------------------------------------------------
+BIG_FIVE_TYPES = [
+    "Openness",          # Terbuka, kreatif, imajinatif
+    "Conscientiousness", # Teratur, disiplin, bertanggung jawab
+    "Extraversion",      # Sosial, energik, asertif
+    "Agreeableness",     # Kooperatif, empati, ramah
+    "Neuroticism",       # Sensitif, cemas, emosional
 ]
 
-# Mapping RIASEC → deskripsi karakter siswa
-RIASEC_DESCRIPTIONS = {
+# ------------------------------------------------------------------
+# RIASEC Types (Holland)
+# ------------------------------------------------------------------
+RIASEC_TYPES = [
+    "Realistic",      # Teknis, praktis, fisik
+    "Investigative",  # Analitis, ilmiah, penasaran
+    "Artistic",       # Kreatif, ekspresif
+    "Social",         # Membantu, mengajar, empati
+    "Enterprising",   # Memimpin, wirausaha
+    "Conventional",   # Teratur, detail, administrasi
+]
+
+# ------------------------------------------------------------------
+# Mapping Big Five → RIASEC (berdasarkan psikologi karier)
+# Setiap Big Five memiliki bobot pada 6 tipe RIASEC
+# ------------------------------------------------------------------
+BIGFIVE_TO_RIASEC: Dict[str, Dict[str, float]] = {
+    "Openness": {
+        "Realistic": 0.2, "Investigative": 0.7,
+        "Artistic": 0.9,  "Social": 0.4,
+        "Enterprising": 0.3, "Conventional": 0.1,
+    },
+    "Conscientiousness": {
+        "Realistic": 0.6, "Investigative": 0.5,
+        "Artistic": 0.2,  "Social": 0.3,
+        "Enterprising": 0.5, "Conventional": 0.9,
+    },
+    "Extraversion": {
+        "Realistic": 0.3, "Investigative": 0.2,
+        "Artistic": 0.4,  "Social": 0.8,
+        "Enterprising": 0.9, "Conventional": 0.3,
+    },
+    "Agreeableness": {
+        "Realistic": 0.3, "Investigative": 0.3,
+        "Artistic": 0.5,  "Social": 0.9,
+        "Enterprising": 0.4, "Conventional": 0.4,
+    },
+    "Neuroticism": {
+        "Realistic": 0.2, "Investigative": 0.4,
+        "Artistic": 0.7,  "Social": 0.3,
+        "Enterprising": 0.2, "Conventional": 0.3,
+    },
+}
+
+
+def bigfive_to_riasec_dominant(bigfive_type: str) -> str:
+    """Konversi Big Five personality type ke RIASEC dominan."""
+    if bigfive_type not in BIGFIVE_TO_RIASEC:
+        return "Investigative"
+    weights = BIGFIVE_TO_RIASEC[bigfive_type]
+    return max(weights, key=weights.get)
+
+
+# ------------------------------------------------------------------
+# Rumpun Ilmu & Program Studi
+# ------------------------------------------------------------------
+RUMPUN_ILMU = [
+    "STEM",               # Science, Technology, Engineering, Mathematics
+    "Sosial Humaniora",   # Ilmu Sosial, Hukum, Sastra, dll
+    "Bisnis Manajemen",   # Akuntansi, Manajemen, Ekonomi, dll
+    "Pendidikan",         # Semua jurusan keguruan
+    "Seni Kreatif",       # DKV, Seni Rupa, Musik, dll
+]
+
+# Normalisasi nama Rumpun Ilmu dari dataset
+RUMPUN_NORM: Dict[str, str] = {
+    "STEM (Science, Technology, Engineering, Mathematics)": "STEM",
+    "Sosial Humaniora": "Sosial Humaniora",
+    "Bisnis dan Manajemen": "Bisnis Manajemen",
+    "Pendidikan": "Pendidikan",
+    "Seni dan Industri Kreatif": "Seni Kreatif",
+}
+
+# RIASEC → Rumpun Ilmu yang paling cocok (untuk rekomendasi)
+RIASEC_TO_RUMPUN: Dict[str, List[str]] = {
+    "Realistic":      ["STEM", "Sosial Humaniora"],
+    "Investigative":  ["STEM", "Sosial Humaniora"],
+    "Artistic":       ["Seni Kreatif", "Sosial Humaniora"],
+    "Social":         ["Pendidikan", "Sosial Humaniora", "Bisnis Manajemen"],
+    "Enterprising":   ["Bisnis Manajemen", "Sosial Humaniora"],
+    "Conventional":   ["Bisnis Manajemen", "STEM"],
+}
+
+# Deskripsi karakter RIASEC (ditampilkan ke siswa)
+RIASEC_DESCRIPTIONS: Dict[str, Dict] = {
     "Realistic": {
         "karakter": "Praktis & Teknis",
         "deskripsi": (
-            "Kamu adalah tipe orang yang suka bekerja dengan tangan dan "
-            "benda nyata. Kamu terampil secara teknis, tidak suka banyak "
-            "teori, lebih suka langsung action. Kamu cocok di lingkungan "
-            "lapangan, lab, atau workshop."
+            "Kamu tipe orang yang suka bekerja dengan tangan dan benda nyata. "
+            "Terampil secara teknis, berorientasi hasil, dan lebih suka langsung "
+            "action daripada banyak teori. Cocok di lingkungan lapangan, lab, atau workshop."
         ),
         "kekuatan": ["Keterampilan teknis tinggi", "Berorientasi hasil", "Reliabel & konsisten"],
         "warna": "#E67E22",
@@ -52,10 +137,9 @@ RIASEC_DESCRIPTIONS = {
     "Investigative": {
         "karakter": "Analitis & Ilmiah",
         "deskripsi": (
-            "Kamu adalah pemikir mendalam yang suka menganalisis, "
-            "meneliti, dan memecahkan masalah kompleks. Kamu penasaran "
-            "dengan cara kerja sesuatu dan suka mencari tahu jawaban. "
-            "Kamu nyaman dengan data, logika, dan eksperimen."
+            "Kamu pemikir mendalam yang suka menganalisis, meneliti, dan memecahkan "
+            "masalah kompleks. Penasaran dengan cara kerja sesuatu dan nyaman dengan "
+            "data, logika, dan eksperimen."
         ),
         "kekuatan": ["Kemampuan analisis kuat", "Berpikir logis & sistematis", "Rasa ingin tahu tinggi"],
         "warna": "#2980B9",
@@ -63,21 +147,19 @@ RIASEC_DESCRIPTIONS = {
     "Artistic": {
         "karakter": "Kreatif & Ekspresif",
         "deskripsi": (
-            "Kamu adalah jiwa kreatif yang penuh imajinasi. Kamu suka "
-            "mengekspresikan diri melalui berbagai media dan tidak suka "
-            "terkekang aturan kaku. Kamu punya sensitivitas estetika yang "
-            "tinggi dan melihat dunia dengan cara yang unik."
+            "Kamu jiwa kreatif yang penuh imajinasi. Suka mengekspresikan diri "
+            "melalui berbagai media dan tidak suka terkekang aturan kaku. Punya "
+            "sensitivitas estetika yang tinggi dan cara pandang yang unik."
         ),
-        "kekuatan": ["Kreativitas & inovasi tinggi", "Kemampuan estetika", "Berpikir out-of-the-box"],
+        "kekuatan": ["Kreativitas & inovasi tinggi", "Kepekaan estetika", "Berpikir out-of-the-box"],
         "warna": "#8E44AD",
     },
     "Social": {
         "karakter": "Empatik & Komunikatif",
         "deskripsi": (
-            "Kamu adalah orang yang hangat dan peduli pada orang lain. "
-            "Kamu pandai berkomunikasi, punya empati tinggi, dan senang "
-            "membantu, mengajar, atau membimbing. Kamu tumbuh di lingkungan "
-            "yang melibatkan interaksi manusia."
+            "Kamu hangat dan peduli pada orang lain. Pandai berkomunikasi, punya "
+            "empati tinggi, dan senang membantu atau membimbing. Tumbuh subur di "
+            "lingkungan yang melibatkan interaksi manusia."
         ),
         "kekuatan": ["Komunikasi interpersonal", "Empati & kepedulian", "Kemampuan mengajar/membimbing"],
         "warna": "#27AE60",
@@ -85,145 +167,287 @@ RIASEC_DESCRIPTIONS = {
     "Enterprising": {
         "karakter": "Pemimpin & Wirausaha",
         "deskripsi": (
-            "Kamu adalah tipe pemimpin alami yang ambisius dan percaya diri. "
-            "Kamu suka memengaruhi orang, mengambil keputusan, dan "
-            "mengejar target. Kamu cocok di dunia bisnis, politik, atau "
-            "posisi manajerial."
+            "Kamu tipe pemimpin alami yang ambisius dan percaya diri. Suka "
+            "memengaruhi orang, mengambil keputusan, dan mengejar target. "
+            "Cocok di dunia bisnis, manajemen, atau posisi kepemimpinan."
         ),
-        "kekuatan": ["Jiwa kepemimpinan", "Kemampuan persuasi & negosiasi", "Orientasi pada pencapaian"],
+        "kekuatan": ["Jiwa kepemimpinan", "Persuasi & negosiasi", "Orientasi pencapaian"],
         "warna": "#C0392B",
     },
     "Conventional": {
         "karakter": "Teratur & Detail",
         "deskripsi": (
-            "Kamu adalah orang yang terorganisir, cermat, dan suka bekerja "
-            "dengan sistem yang jelas. Kamu teliti, patuh pada prosedur, "
-            "dan handal dalam mengelola data atau administrasi. Kamu cocok "
-            "di lingkungan yang terstruktur dan presisi tinggi."
+            "Kamu terorganisir, cermat, dan suka bekerja dengan sistem yang jelas. "
+            "Teliti, patuh pada prosedur, dan handal dalam mengelola data atau "
+            "administrasi. Cocok di lingkungan yang terstruktur dan presisi tinggi."
         ),
-        "kekuatan": ["Ketelitian & presisi tinggi", "Kemampuan organisasi", "Reliable & disiplin"],
+        "kekuatan": ["Ketelitian & presisi", "Kemampuan organisasi", "Reliabel & disiplin"],
         "warna": "#7F8C8D",
     },
 }
 
-# Daftar semua jurusan yang bisa direkomendasikan
-ALL_MAJORS = [
-    "Akuntansi", "Informatika", "Sistem Informasi", "DKV", "Psikologi",
-    "Manajemen", "Teknik Sipil", "Teknik Elektro", "Teknik Mesin",
-    "Kedokteran", "Farmasi", "Ilmu Komunikasi", "Pendidikan", "Hukum",
-    "Arsitektur", "Biologi", "Kimia", "Matematika", "Statistik",
-    "Bisnis Internasional",
-]
+
+def _norm_program_studi(nama: str) -> str:
+    """Bersihkan nama Program Studi (hapus spasi berlebih, standarisasi)."""
+    if not isinstance(nama, str):
+        return str(nama)
+    s = nama.strip()
+    s = re.sub(r'\s+', ' ', s)
+    # Standarisasi beberapa yang duplikat
+    fixes = {
+        "S1 Manajement": "S1 Manajemen",
+        "S1 Manajemen ": "S1 Manajemen",
+        "S1  Manajemen Bisnis": "S1 Manajemen Bisnis",
+        "Akuntansi ": "S1 Akuntansi",
+        "Akuntansi": "S1 Akuntansi",
+        "S1 Akuntansi ": "S1 Akuntansi",
+        "D4 Teknik Informatika ": "D4 Teknik Informatika",
+        "Teknik Informatika ": "S1 Teknik Informatika",
+        "S1 Kesehatan Masyarakat ": "S1 Kesehatan Masyarakat",
+        "S1 Kesehatam Masyarakat ": "S1 Kesehatan Masyarakat",
+        "S1 Kesehatam Masyarakat":  "S1 Kesehatan Masyarakat",
+        "S1 Ilmu Kesehatan Masyarakat ": "S1 Ilmu Kesehatan Masyarakat",
+        "S1 Pendidikan Bahasa Inggris ": "S1 Pendidikan Bahasa Inggris",
+        "Pendidikan bahasa inggris ": "S1 Pendidikan Bahasa Inggris",
+        "S1 Bimbingan dan Konseling ": "S1 Bimbingan dan Konseling",
+        "Ilmu Komunikasi ": "S1 Ilmu Komunikasi",
+        "Ilmu Komunikasi": "S1 Ilmu Komunikasi",
+        "S1 Teknik Industri ": "S1 Teknik Industri",
+        "S1 Teknik Sipil ": "S1 Teknik Sipil",
+        "S1 Psikologi ": "S1 Psikologi",
+        "S1 Manajemen ": "S1 Manajemen",
+        "Manajemen": "S1 Manajemen",
+        "Sistem Informasi": "S1 Sistem Informasi",
+        "S1 Matematika Murni": "S1 Matematika",
+        "S1 Pendidikan Guru Sekolah Dasar ": "S1 Pendidikan Guru Sekolah Dasar",
+        "S1 Pendidikan Guru Sekolah Dasar (PGSD)": "S1 Pendidikan Guru Sekolah Dasar",
+        "S1 Ilmu Keolahragaan ": "S1 Ilmu Keolahragaan",
+        "S1 Pendidikan Jasmani Kesehatan dan Rekreasi ": "S1 Pendidikan Jasmani",
+        "S1 Pendidikan Kepelatihan Olahraga ": "S1 Pendidikan Olahraga",
+        "D3 Kesekretariatan ": "D3 Kesekretariatan",
+        "S1 Farmasi ": "S1 Farmasi",
+        "S1 Teknik Geologi ": "S1 Teknik Geologi",
+        "S1 Teknik Lingkungan ": "S1 Teknik Lingkungan",
+        "S1 Hubungan Hubungan Internasional": "S1 Hubungan Internasional",
+        "S1 Pendidikan Agam Islam": "S1 Pendidikan Agama Islam",
+        "Seni Kuliner": "D4 Seni Kuliner",
+        "S2 Linguistik Murni ": "S1 Sastra Indonesia",
+    }
+    return fixes.get(s, s)
 
 
 class DatasetLoader:
     """
-    Kelas untuk memuat dan menggabungkan semua dataset.
+    Memuat dan menyiapkan dataset real untuk training ML.
 
     Cara pakai:
-        loader = DatasetLoader(data_dir="data/raw")
-        X_train, X_test, y_riasec_train, ... = loader.load_and_split()
+        loader = DatasetLoader(data_dir='data_new')
+        X_img, y_bigfive = loader.load_tulisan_dataset(img_base_dir)
+        df_akademik = loader.load_akademik()
+        df_talent   = loader.load_talent()
     """
 
-    def __init__(self, data_dir: str = "data/raw"):
+    def __init__(self, data_dir: str = "data_new"):
         self.data_dir = data_dir
 
     # ------------------------------------------------------------------
-    # FUNGSI UTAMA: load_all()
+    # Dataset Tulisan: gambar per folder Big Five
     # ------------------------------------------------------------------
-    def load_all(self) -> pd.DataFrame:
+    def load_tulisan_image_paths(
+        self,
+        img_base: Optional[str] = None,
+    ) -> Tuple[List[str], List[str]]:
         """
-        Baca dan gabungkan semua dataset menjadi 1 DataFrame.
+        Muat path gambar dan label Big Five dari struktur folder.
+
+        Struktur folder yang diharapkan:
+          img_base/
+            Openness/img1.jpg
+            Conscientiousness/img2.jpg
+            ...
 
         Returns:
-            DataFrame dengan semua fitur + label (dominant_riasec, recommended_major)
+            (paths, labels) — list path gambar dan label Big Five-nya
         """
-        akademik = self._load_akademik()
-        talent = self._load_talent()
-        tulisan = self._load_tulisan()
+        if img_base is None:
+            img_base = os.path.join(self.data_dir, "Dataset_TulisanN")
 
-        # Gabungkan berdasarkan sample_id
-        df = akademik.merge(talent, on="sample_id", suffixes=("", "_talent"))
-        df = df.merge(tulisan, on="sample_id", suffixes=("", "_tulisan"))
+        paths, labels = [], []
+        for category in BIG_FIVE_TYPES:
+            cat_dir = os.path.join(img_base, category)
+            if not os.path.isdir(cat_dir):
+                logger.warning(f"Folder tidak ditemukan: {cat_dir}")
+                continue
+            for fname in sorted(os.listdir(cat_dir)):
+                if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                    paths.append(os.path.join(cat_dir, fname))
+                    labels.append(category)
+            logger.info(f"  {category}: {sum(1 for l in labels if l == category)} gambar dimuat")
 
-        # Pilih 1 kolom dominant_riasec dan recommended_major
-        # (ambil dari dataset tulisan sebagai ground truth)
-        df["dominant_riasec"] = df["dominant_riasec_tulisan"]
-        df["recommended_major"] = df["recommended_major_tulisan"]
-        df = df.drop(columns=[c for c in df.columns if c.endswith(("_talent", "_tulisan"))])
-
-        logger.info(f"Dataset gabungan: {df.shape[0]} baris, {df.shape[1]} kolom")
-        return df
-
-    def get_feature_columns(self) -> Dict[str, List[str]]:
-        """
-        Kembalikan nama kolom per kelompok fitur.
-        Berguna untuk memahami fitur mana yang dipakai model.
-        """
-        return {
-            "akademik": [
-                "agama", "pancasila", "bahasa_indonesia", "matematika",
-                "ipa", "ips", "bahasa_inggris", "pjok", "informatika",
-                "seni_budaya", "logika", "kreativitas", "komunikasi",
-                "kepemimpinan", "problem_solving", "teamwork", "literasi",
-                "numerasi",
-            ],
-            "talent": [
-                "komunikasi_t", "kepemimpinan_t", "kreativitas_t", "logika_t",
-                "teknologi", "riset", "seni", "olahraga", "organisasi",
-                "kewirausahaan", "kerja_tim", "problem_solving_t",
-            ],
-            "tulisan": [
-                "letter_size", "slant", "pressure", "spacing",
-                "readability", "neatness", "ornament", "connectivity",
-                "baseline",
-                "realistic", "investigative", "artistic", "social",
-                "enterprising", "conventional",
-            ],
-        }
+        logger.info(f"Total gambar tulisan: {len(paths)}")
+        return paths, labels
 
     # ------------------------------------------------------------------
-    # Load per-dataset
+    # Dataset Akademik
     # ------------------------------------------------------------------
-    def _load_akademik(self) -> pd.DataFrame:
-        path = os.path.join(self.data_dir, "Dataset_Akademik.xlsx")
-        df = pd.read_excel(path)
-        logger.info(f"Akademik: {df.shape}")
-        return df
+    def load_akademik(self) -> pd.DataFrame:
+        """
+        Muat Dataset_AkademikN.xlsx dan standarisasi kolom.
 
-    def _load_talent(self) -> pd.DataFrame:
-        path = os.path.join(self.data_dir, "Dataset_Talent.xlsx")
+        Returns:
+            DataFrame dengan kolom terstandarisasi + kolom target bersih
+        """
+        path = os.path.join(self.data_dir, "Dataset_AkademikN.xlsx")
         df = pd.read_excel(path)
-        # Rename agar tidak tabrakan saat merge
-        rename_map = {
-            "komunikasi": "komunikasi_t",
-            "kepemimpinan": "kepemimpinan_t",
-            "kreativitas": "kreativitas_t",
-            "logika": "logika_t",
-            "problem_solving": "problem_solving_t",
+
+        # Rename kolom ke nama pendek yang mudah dipakai
+        rename = {
+            "Matematika Semester 4":    "mat_s4",
+            "Fisika Semester 4":        "fis_s4",
+            "Kimia Semester 4":         "kim_s4",
+            "Biologi Semester 4":       "bio_s4",
+            "Bahasa Indonesia Semester 4": "bind_s4",
+            "Bahasa Inggris Semester 4":   "bing_s4",
+            "Informatika Semester 4":   "info_s4",
+            "Matematika Semester 5":    "mat_s5",
+            "Fisika Semester 5":        "fis_s5",
+            "Kimia Semester 5":         "kim_s5",
+            "Biologi Semester 5":       "bio_s5",
+            "Bahasa Indonesia Semester 5": "bind_s5",
+            "Bahasa Inggris Semester 5":   "bing_s5",
+            "Informatika Semester 5":   "info_s5",
+            "Rumpun Ilmu":              "rumpun_ilmu",
+            "Program Studi":            "program_studi",
+            "Tingkat kesesuaian ":      "tingkat_kesesuaian",
         }
-        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-        logger.info(f"Talent: {df.shape}")
+        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+
+        # Normalisasi nama rumpun ilmu
+        df["rumpun_ilmu"] = df["rumpun_ilmu"].map(
+            lambda x: RUMPUN_NORM.get(str(x).strip(), str(x).strip())
+        )
+
+        # Bersihkan nama program studi
+        df["program_studi"] = df["program_studi"].map(_norm_program_studi)
+
+        # Isi nilai kosong (0 = tidak ambil pelajaran) dengan median
+        num_cols = [c for c in df.columns if c not in
+                    ["rumpun_ilmu", "program_studi", "tingkat_kesesuaian"]]
+        for col in num_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            median_val = df[col][df[col] > 0].median()
+            df[col] = df[col].fillna(median_val if not pd.isna(median_val) else 75)
+
+        logger.info(f"Akademik: {df.shape[0]} siswa, {df.shape[1]} kolom")
+        logger.info(f"Rumpun Ilmu: {df['rumpun_ilmu'].value_counts().to_dict()}")
         return df
 
-    def _load_tulisan(self) -> pd.DataFrame:
-        path = os.path.join(self.data_dir, "Dataset_Tulisan.xlsx")
+    @property
+    def akademik_feature_cols(self) -> List[str]:
+        """Daftar kolom fitur akademik (bukan target)."""
+        return [
+            "mat_s4", "fis_s4", "kim_s4", "bio_s4", "bind_s4", "bing_s4", "info_s4",
+            "mat_s5", "fis_s5", "kim_s5", "bio_s5", "bind_s5", "bing_s5", "info_s5",
+        ]
+
+    # ------------------------------------------------------------------
+    # Dataset Talent: Gardner Multiple Intelligence
+    # ------------------------------------------------------------------
+    def load_talent(self) -> pd.DataFrame:
+        """
+        Muat Dataset_TalentN.xlsx (kecerdasan majemuk Gardner).
+
+        Hanya ambil kolom kecerdasan numerik:
+          Linguistic, Musical, Bodily, Logical-Mathematical,
+          Spatial-Visualization, Interpersonal, Intrapersonal, Naturalist
+
+        Returns:
+            DataFrame dengan kolom kecerdasan + job_profession sebagai label
+        """
+        path = os.path.join(self.data_dir, "Dataset_TalentN.xlsx")
         df = pd.read_excel(path)
 
-        # Encode kolom kategorik menjadi angka
-        style_map = {"Neat Print": 0, "Formal Cursive": 1, "Technical Block": 2,
-                     "Artistic Script": 3, "Bold Print": 4}
-        type_map = {"Print": 0, "Cursive": 1, "Mixed": 2}
-        doc_map = {"Notebook": 0, "Formal Letter": 1, "Art Paper": 2, "Grid Paper": 3}
+        rename = {
+            "Linguistic":             "linguistik",
+            "Musical":                "musikal",
+            "Bodily":                 "kinestetik",
+            "Logical - Mathematical": "logika_mat",
+            "Spatial-Visualization":  "spasial",
+            "Interpersonal":          "interpersonal",
+            "Intrapersonal":          "intrapersonal",
+            "Naturalist":             "naturalis",
+            "Job profession":         "profesi",
+        }
+        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
 
-        df["style_category"] = df["style_category"].map(style_map).fillna(0)
-        df["writing_type"] = df["writing_type"].map(type_map).fillna(0)
-        df["document_type"] = df["document_type"].map(doc_map).fillna(0)
+        # Bersihkan profesi
+        if "profesi" in df.columns:
+            df["profesi"] = df["profesi"].str.strip().str.replace(r'\n', '', regex=True)
 
-        # Konversi kolom RIASEC ke numerik (bisa berupa string)
-        for col in ["realistic", "investigative", "artistic", "social", "enterprising", "conventional"]:
+        # Hanya ambil kolom yang relevan
+        talent_cols = ["linguistik", "musikal", "kinestetik", "logika_mat",
+                       "spasial", "interpersonal", "intrapersonal", "naturalis"]
+        available = [c for c in talent_cols if c in df.columns]
+        if "profesi" in df.columns:
+            available += ["profesi"]
+
+        df = df[available].dropna(subset=[c for c in talent_cols if c in df.columns])
+
+        for col in talent_cols:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(5)
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(10)
 
-        logger.info(f"Tulisan: {df.shape}")
+        logger.info(f"Talent: {df.shape[0]} profil, {len(available)-1} kecerdasan")
         return df
+
+    @property
+    def talent_feature_cols(self) -> List[str]:
+        """Daftar kolom fitur kecerdasan Gardner."""
+        return [
+            "linguistik", "musikal", "kinestetik", "logika_mat",
+            "spasial", "interpersonal", "intrapersonal", "naturalis",
+        ]
+
+
+# ------------------------------------------------------------------
+# Mapping Gardner MI → bobot RIASEC
+# (dipakai di predictor untuk enrichment, bukan training)
+# ------------------------------------------------------------------
+GARDNER_TO_RIASEC_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "linguistik":     {"Social": 0.7, "Artistic": 0.6, "Enterprising": 0.4},
+    "musikal":        {"Artistic": 0.9, "Investigative": 0.3},
+    "kinestetik":     {"Realistic": 0.8, "Social": 0.3},
+    "logika_mat":     {"Investigative": 0.9, "Conventional": 0.6, "Realistic": 0.4},
+    "spasial":        {"Artistic": 0.7, "Realistic": 0.5, "Investigative": 0.4},
+    "interpersonal":  {"Social": 0.9, "Enterprising": 0.7},
+    "intrapersonal":  {"Investigative": 0.5, "Artistic": 0.5},
+    "naturalis":      {"Realistic": 0.7, "Investigative": 0.6},
+}
+
+
+def compute_riasec_from_gardner(talent_scores: Dict[str, float]) -> Dict[str, float]:
+    """
+    Hitung skor RIASEC dari profil kecerdasan majemuk Gardner.
+
+    Args:
+        talent_scores: {'linguistik': 12, 'musikal': 6, ...}
+                       Nilai asli dari tes Gardner (range bervariasi)
+
+    Returns:
+        {'Realistic': 0.3, 'Investigative': 0.7, ...} (dinormalisasi 0-1)
+    """
+    riasec_raw = {t: 0.0 for t in RIASEC_TYPES}
+    riasec_count = {t: 0 for t in RIASEC_TYPES}
+
+    for mi_name, score in talent_scores.items():
+        if mi_name not in GARDNER_TO_RIASEC_WEIGHTS:
+            continue
+        # Normalisasi skor Gardner ke 0-1 (asumsi max = 20 berdasarkan dataset)
+        normalized = min(score / 20.0, 1.0)
+        for riasec_type, weight in GARDNER_TO_RIASEC_WEIGHTS[mi_name].items():
+            riasec_raw[riasec_type] += normalized * weight
+            riasec_count[riasec_type] += 1
+
+    # Normalisasi hasil akhir ke 0-1
+    total = sum(riasec_raw.values()) or 1.0
+    return {k: round(v / total, 4) for k, v in riasec_raw.items()}

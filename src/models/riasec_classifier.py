@@ -1,206 +1,303 @@
 """
 =============================================================
-MODUL: riasec_classifier.py
+MODUL: riasec_classifier.py  (Dataset Real v2)
 =============================================================
-TUJUAN:
-  Melatih dan menyimpan model klasifikasi RIASEC.
-  RIASEC adalah kerangka psikologi karier Holland yang membagi
-  kepribadian ke 6 tipe: Realistic, Investigative, Artistic,
-  Social, Enterprising, Conventional.
+Dua classifier utama:
 
-MODEL YANG DIGUNAKAN:
-  RandomForestClassifier — karena:
-  1. Bekerja baik dengan dataset kecil (40 sampel)
-  2. Menangani fitur numerik dan kategorik campuran
-  3. Tahan terhadap overfitting berkat ensemble
-  4. Memberikan feature importance (berguna untuk interpretasi)
+  1. BigFiveClassifier
+     Input : 10 fitur gambar tulisan tangan
+     Output: label Big Five (Openness / Conscientiousness /
+             Extraversion / Agreeableness / Neuroticism)
+     Dataset: 221 gambar berlabel dari folder Big Five
 
-PIPELINE:
-  Input fitur → StandardScaler (normalisasi) → RandomForest → Prediksi RIASEC
+  2. RumpunClassifier
+     Input : 14 nilai akademik (2 semester)
+     Output: Rumpun Ilmu (STEM / Sosial Humaniora /
+             Bisnis Manajemen / Pendidikan / Seni Kreatif)
+     Dataset: 140 data akademik
+
+Keduanya menggunakan RandomForest / GradientBoosting
+dengan class_weight untuk menangani ketidakseimbangan kelas.
 =============================================================
 """
 
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import cross_val_score, StratifiedKFold
-from sklearn.metrics import classification_report, accuracy_score
-import joblib
 import os
 import logging
-from typing import Tuple, Dict, List
+import numpy as np
+import pandas as pd
+import joblib
+from typing import Dict, List, Optional
+
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import StratifiedKFold, cross_validate
 
 logger = logging.getLogger(__name__)
 
 
-class RIASECClassifier:
+def _balanced_weights(y: pd.Series) -> Dict[str, float]:
+    counts = y.value_counts()
+    n_total = len(y)
+    n_classes = len(counts)
+    return {cls: n_total / (n_classes * cnt) for cls, cnt in counts.items()}
+
+
+# ------------------------------------------------------------------
+# 1. BigFiveClassifier — Gambar → Big Five Personality
+# ------------------------------------------------------------------
+
+class BigFiveClassifier:
     """
-    Classifier untuk memprediksi tipe RIASEC dominan siswa.
+    Memprediksi Big Five personality dari 10 fitur tulisan tangan.
 
-    Input:  fitur gabungan (nilai akademik + bakat + tulisan tangan)
-    Output: salah satu dari 6 tipe RIASEC
+    Input : dict / DataFrame dengan kolom:
+            letter_size, slant, pressure, spacing, readability,
+            neatness, connectivity, ornament, baseline, density
 
-    Cara pakai:
-        clf = RIASECClassifier()
-        clf.train(X_train, y_train)
-        prediksi = clf.predict(X_test)
-        clf.save("models/riasec_model.pkl")
+    Output: label Big Five string
+            {'Openness', 'Conscientiousness', 'Extraversion',
+             'Agreeableness', 'Neuroticism'}
     """
 
-    def __init__(self, n_estimators: int = 200, random_state: int = 42):
-        """
-        Args:
-            n_estimators: jumlah pohon di RandomForest (lebih banyak = lebih akurat tapi lambat)
-            random_state : seed untuk reproducibility
-        """
-        self.label_encoder = LabelEncoder()
-        self.feature_names: List[str] = []
+    FEATURES = [
+        "letter_size", "slant", "pressure", "spacing", "readability",
+        "neatness", "connectivity", "ornament", "baseline", "density",
+    ]
 
-        # Pipeline: normalisasi → model
-        # StandardScaler: mengubah semua fitur ke skala 0-1
-        # RandomForest: ensemble dari banyak decision tree
+    def __init__(self):
+        self.pipeline: Optional[Pipeline] = None
+        self.classes_: List[str] = []
+        self._feature_importances: Dict[str, float] = {}
+
+    def train(self, X: pd.DataFrame, y: pd.Series) -> dict:
+        self.classes_ = sorted(y.unique().tolist())
+        logger.info(f"BigFive training: {len(X)} sampel, {len(self.classes_)} kelas")
+        logger.info(f"  Distribusi: {y.value_counts().to_dict()}")
+
+        X_feat = self._ensure_features(X)
+        class_weights = _balanced_weights(y)
+
         self.pipeline = Pipeline([
             ("scaler", StandardScaler()),
-            ("classifier", RandomForestClassifier(
-                n_estimators=n_estimators,
-                max_depth=8,           # hindari overfitting (dataset kecil)
-                min_samples_split=2,   # min sampel untuk split node
-                min_samples_leaf=1,    # min sampel di daun
-                class_weight="balanced",  # tangani imbalanced class
-                random_state=random_state,
-                n_jobs=-1,             # pakai semua core CPU
+            ("clf", RandomForestClassifier(
+                n_estimators=300,
+                max_depth=None,
+                min_samples_leaf=2,
+                max_features="sqrt",
+                class_weight=class_weights,
+                random_state=42,
+                n_jobs=-1,
             )),
         ])
 
-    # ------------------------------------------------------------------
-    # TRAIN
-    # ------------------------------------------------------------------
-    def train(self, X: pd.DataFrame, y: pd.Series) -> Dict:
-        """
-        Latih model RIASEC.
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        cv_results = cross_validate(
+            self.pipeline, X_feat, y,
+            cv=cv, scoring="accuracy", return_train_score=True,
+        )
 
-        Args:
-            X: DataFrame fitur (tiap baris = 1 siswa)
-            y: Series label RIASEC (misalnya "Conventional", "Investigative")
+        self.pipeline.fit(X_feat, y)
 
-        Returns:
-            dict berisi metrik akurasi dan laporan per kelas
-        """
-        self.feature_names = list(X.columns)
-
-        # Encode label string → angka (Conventional=0, Enterprising=1, dst)
-        y_encoded = self.label_encoder.fit_transform(y)
-
-        logger.info(f"Training RIASEC classifier: {X.shape[0]} sampel, {X.shape[1]} fitur")
-        logger.info(f"Distribusi kelas: {dict(zip(*np.unique(y, return_counts=True)))}")
-
-        # Cross validation untuk estimasi akurasi yang lebih jujur
-        # (penting karena dataset kecil = mudah overfitting)
-        cv = StratifiedKFold(n_splits=min(5, len(np.unique(y_encoded))), shuffle=True, random_state=42)
-        cv_scores = cross_val_score(self.pipeline, X, y_encoded, cv=cv, scoring="accuracy")
-
-        logger.info(f"CV Accuracy: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
-
-        # Latih dengan semua data
-        self.pipeline.fit(X, y_encoded)
-
-        # Prediksi ulang untuk laporan training
-        y_pred = self.pipeline.predict(X)
-        train_acc = accuracy_score(y_encoded, y_pred)
+        rf = self.pipeline.named_steps["clf"]
+        self._feature_importances = dict(zip(self.FEATURES, rf.feature_importances_.tolist()))
 
         metrics = {
-            "train_accuracy": round(train_acc, 4),
-            "cv_accuracy_mean": round(cv_scores.mean(), 4),
-            "cv_accuracy_std": round(cv_scores.std(), 4),
-            "classes": list(self.label_encoder.classes_),
-            "n_features": X.shape[1],
-            "n_samples": X.shape[0],
+            "classes":          self.classes_,
+            "n_samples":        len(X),
+            "cv_accuracy_mean": float(np.mean(cv_results["test_score"])),
+            "cv_accuracy_std":  float(np.std(cv_results["test_score"])),
+            "train_accuracy":   float(np.mean(cv_results["train_score"])),
         }
-
-        logger.info(f"Training accuracy: {train_acc:.3f}")
+        logger.info(f"  CV Accuracy: {metrics['cv_accuracy_mean']:.1%} ± {metrics['cv_accuracy_std']:.1%}")
         return metrics
 
-    # ------------------------------------------------------------------
-    # PREDICT
-    # ------------------------------------------------------------------
-    def predict(self, X: pd.DataFrame) -> str:
-        """
-        Prediksi tipe RIASEC dominan untuk 1 atau lebih siswa.
+    def predict(self, features: Dict[str, float]) -> str:
+        if self.pipeline is None:
+            raise RuntimeError("Model belum dilatih. Panggil load() dulu.")
+        X = self._dict_to_df(features)
+        return str(self.pipeline.predict(X)[0])
 
-        Args:
-            X: DataFrame fitur (baris = jumlah siswa)
+    def predict_proba(self, features: Dict[str, float]) -> Dict[str, float]:
+        if self.pipeline is None:
+            raise RuntimeError("Model belum dilatih.")
+        X = self._dict_to_df(features)
+        proba = self.pipeline.predict_proba(X)[0]
+        return {cls: float(round(p, 4)) for cls, p in
+                zip(self.pipeline.classes_, proba)}
 
-        Returns:
-            string nama tipe RIASEC (misalnya "Investigative")
-        """
-        X_aligned = self._align_features(X)
-        pred_encoded = self.pipeline.predict(X_aligned)
-        return self.label_encoder.inverse_transform(pred_encoded)[0]
-
-    def predict_proba(self, X: pd.DataFrame) -> Dict[str, float]:
-        """
-        Prediksi probabilitas untuk setiap tipe RIASEC.
-
-        Returns:
-            dict: {"Conventional": 0.4, "Investigative": 0.3, ...}
-        """
-        X_aligned = self._align_features(X)
-        proba = self.pipeline.predict_proba(X_aligned)[0]
-        classes = self.label_encoder.classes_
-
-        result = {cls: round(float(p), 4) for cls, p in zip(classes, proba)}
-        return dict(sorted(result.items(), key=lambda x: -x[1]))
-
-    # ------------------------------------------------------------------
-    # FEATURE IMPORTANCE
-    # ------------------------------------------------------------------
     def get_feature_importance(self, top_n: int = 10) -> List[Dict]:
-        """
-        Tampilkan fitur yang paling berpengaruh pada prediksi RIASEC.
-        Berguna untuk interpretasi model kepada siswa.
+        if not self._feature_importances:
+            return []
+        sorted_fi = sorted(self._feature_importances.items(), key=lambda x: -x[1])
+        return [{"fitur": k, "importance": round(v, 4)} for k, v in sorted_fi[:top_n]]
 
-        Returns:
-            list of dict: [{"fitur": "matematika", "importance": 0.12}, ...]
-        """
-        rf = self.pipeline.named_steps["classifier"]
-        importances = rf.feature_importances_
-
-        fi = sorted(
-            zip(self.feature_names, importances),
-            key=lambda x: -x[1]
-        )[:top_n]
-
-        return [{"fitur": name, "importance": round(imp, 4)} for name, imp in fi]
-
-    # ------------------------------------------------------------------
-    # SAVE / LOAD
-    # ------------------------------------------------------------------
-    def save(self, path: str):
-        """Simpan model ke file .pkl"""
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    def save(self, path: str) -> None:
+        if os.path.dirname(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
         joblib.dump({
-            "pipeline": self.pipeline,
-            "label_encoder": self.label_encoder,
-            "feature_names": self.feature_names,
-        }, path)
-        logger.info(f"Model RIASEC disimpan: {path}")
+            "pipeline":            self.pipeline,
+            "classes_":            self.classes_,
+            "feature_importances": self._feature_importances,
+        }, path, compress=3)
+        logger.info(f"BigFive model disimpan: {path}")
 
-    def load(self, path: str):
-        """Muat model dari file .pkl"""
+    @classmethod
+    def load(cls, path: str) -> "BigFiveClassifier":
+        obj = cls()
         data = joblib.load(path)
-        self.pipeline = data["pipeline"]
-        self.label_encoder = data["label_encoder"]
-        self.feature_names = data["feature_names"]
-        logger.info(f"Model RIASEC dimuat: {path}")
+        obj.pipeline = data["pipeline"]
+        obj.classes_ = data["classes_"]
+        obj._feature_importances = data.get("feature_importances", {})
+        logger.info(f"BigFive model dimuat: {path}")
+        return obj
 
-    # ------------------------------------------------------------------
-    # Helper
-    # ------------------------------------------------------------------
-    def _align_features(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Pastikan kolom input sesuai dengan fitur saat training."""
-        for col in self.feature_names:
+    def _ensure_features(self, X: pd.DataFrame) -> pd.DataFrame:
+        for col in self.FEATURES:
             if col not in X.columns:
-                X[col] = 0.0
-        return X[self.feature_names]
+                X = X.copy()
+                X[col] = 5.0
+        return X[self.FEATURES]
+
+    def _dict_to_df(self, features: Dict[str, float]) -> pd.DataFrame:
+        return pd.DataFrame([{f: features.get(f, 5.0) for f in self.FEATURES}])
+
+
+# ------------------------------------------------------------------
+# 2. RumpunClassifier — Akademik → Rumpun Ilmu
+# ------------------------------------------------------------------
+
+class RumpunClassifier:
+    """
+    Memprediksi Rumpun Ilmu dari nilai akademik 2 semester.
+
+    Input : dict dengan 14 key (mat_s4, fis_s4, ..., info_s5)
+    Output: 'STEM' | 'Sosial Humaniora' | 'Bisnis Manajemen' |
+            'Pendidikan' | 'Seni Kreatif'
+    """
+
+    FEATURES = [
+        "mat_s4", "fis_s4", "kim_s4", "bio_s4", "bind_s4", "bing_s4", "info_s4",
+        "mat_s5", "fis_s5", "kim_s5", "bio_s5", "bind_s5", "bing_s5", "info_s5",
+    ]
+
+    FEATURE_LABELS = {
+        "mat_s4": "Matematika Smt 4",  "fis_s4": "Fisika Smt 4",
+        "kim_s4": "Kimia Smt 4",       "bio_s4": "Biologi Smt 4",
+        "bind_s4": "B. Indonesia Smt 4","bing_s4": "B. Inggris Smt 4",
+        "info_s4": "Informatika Smt 4", "mat_s5": "Matematika Smt 5",
+        "fis_s5": "Fisika Smt 5",       "kim_s5": "Kimia Smt 5",
+        "bio_s5": "Biologi Smt 5",      "bind_s5": "B. Indonesia Smt 5",
+        "bing_s5": "B. Inggris Smt 5",  "info_s5": "Informatika Smt 5",
+    }
+
+    # Mata pelajaran kunci per rumpun (heuristik fallback)
+    RUMPUN_KEY_SUBJECTS = {
+        "STEM":             ["mat_s4", "mat_s5", "fis_s4", "fis_s5",
+                             "kim_s4", "kim_s5", "info_s4", "info_s5"],
+        "Sosial Humaniora": ["bind_s4", "bind_s5", "bing_s4", "bing_s5"],
+        "Bisnis Manajemen": ["mat_s4", "mat_s5", "bing_s4", "bing_s5"],
+        "Pendidikan":       ["bind_s4", "bind_s5", "bio_s4", "bio_s5"],
+        "Seni Kreatif":     ["bing_s4", "bing_s5", "bind_s4"],
+    }
+
+    def __init__(self):
+        self.pipeline: Optional[Pipeline] = None
+        self.classes_: List[str] = []
+        self._feature_importances: Dict[str, float] = {}
+
+    def train(self, X: pd.DataFrame, y: pd.Series) -> dict:
+        self.classes_ = sorted(y.unique().tolist())
+        logger.info(f"Rumpun training: {len(X)} siswa, {len(self.classes_)} rumpun")
+
+        X_feat = self._ensure_features(X)
+
+        self.pipeline = Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", GradientBoostingClassifier(
+                n_estimators=200,
+                max_depth=4,
+                learning_rate=0.1,
+                subsample=0.8,
+                random_state=42,
+            )),
+        ])
+
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        cv_results = cross_validate(
+            self.pipeline, X_feat, y,
+            cv=cv, scoring="accuracy", return_train_score=True,
+        )
+
+        self.pipeline.fit(X_feat, y)
+
+        gb = self.pipeline.named_steps["clf"]
+        self._feature_importances = dict(zip(self.FEATURES, gb.feature_importances_.tolist()))
+
+        metrics = {
+            "classes":          self.classes_,
+            "n_samples":        len(X),
+            "cv_accuracy_mean": float(np.mean(cv_results["test_score"])),
+            "cv_accuracy_std":  float(np.std(cv_results["test_score"])),
+            "train_accuracy":   float(np.mean(cv_results["train_score"])),
+        }
+        logger.info(f"  CV Accuracy: {metrics['cv_accuracy_mean']:.1%} ± {metrics['cv_accuracy_std']:.1%}")
+        return metrics
+
+    def predict(self, academic_scores: Dict[str, float]) -> str:
+        if self.pipeline is None:
+            return self.heuristic_predict(academic_scores)
+        X = self._dict_to_df(academic_scores)
+        return str(self.pipeline.predict(X)[0])
+
+    def predict_proba(self, academic_scores: Dict[str, float]) -> Dict[str, float]:
+        if self.pipeline is None:
+            raise RuntimeError("Model belum dilatih.")
+        X = self._dict_to_df(academic_scores)
+        proba = self.pipeline.predict_proba(X)[0]
+        return {cls: float(round(p, 4)) for cls, p in
+                zip(self.pipeline.classes_, proba)}
+
+    def heuristic_predict(self, scores: Dict[str, float]) -> str:
+        rumpun_scores = {
+            r: float(np.mean([scores.get(s, 75) for s in subjs]))
+            for r, subjs in self.RUMPUN_KEY_SUBJECTS.items()
+        }
+        return max(rumpun_scores, key=rumpun_scores.get)
+
+    def get_top_subjects(self, academic_scores: Dict[str, float], top_n: int = 3) -> List[Dict]:
+        sorted_subj = sorted(academic_scores.items(), key=lambda x: -x[1])
+        return [
+            {"mata_pelajaran": self.FEATURE_LABELS.get(k, k), "nilai": round(v, 1)}
+            for k, v in sorted_subj[:top_n]
+        ]
+
+    def save(self, path: str) -> None:
+        if os.path.dirname(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        joblib.dump({
+            "pipeline":            self.pipeline,
+            "classes_":            self.classes_,
+            "feature_importances": self._feature_importances,
+        }, path, compress=3)
+        logger.info(f"Rumpun model disimpan: {path}")
+
+    @classmethod
+    def load(cls, path: str) -> "RumpunClassifier":
+        obj = cls()
+        data = joblib.load(path)
+        obj.pipeline = data["pipeline"]
+        obj.classes_ = data["classes_"]
+        obj._feature_importances = data.get("feature_importances", {})
+        logger.info(f"Rumpun model dimuat: {path}")
+        return obj
+
+    def _ensure_features(self, X: pd.DataFrame) -> pd.DataFrame:
+        for col in self.FEATURES:
+            if col not in X.columns:
+                X = X.copy()
+                X[col] = 75.0
+        return X[self.FEATURES]
+
+    def _dict_to_df(self, scores: Dict[str, float]) -> pd.DataFrame:
+        return pd.DataFrame([{f: scores.get(f, 75.0) for f in self.FEATURES}])

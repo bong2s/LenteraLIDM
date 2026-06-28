@@ -1,139 +1,145 @@
 """
 =============================================================
-ROUTE: /predict
+ROUTE: /predict  (Dataset Real v2)
 =============================================================
-TUJUAN:
-  Endpoint utama yang diterima dari website Laravel.
-  Menerima:
-    - File gambar tulisan tangan (multipart/form-data)
-    - Data akademik (JSON, opsional)
-    - Data bakat (JSON, opsional)
+Endpoint utama yang diterima dari website Laravel.
 
-  Mengembalikan:
-    - Tipe karakter RIASEC
-    - Deskripsi kepribadian siswa
-    - Top-3 rekomendasi jurusan + alasan
+Menerima:
+  - file     : gambar tulisan tangan (multipart/form-data)
+  - akademik : JSON nilai 14 mata pelajaran (opsional)
+  - talent   : JSON skor 8 kecerdasan Gardner (opsional)
 
-CARA KIRIM DARI LARAVEL / JavaScript:
-  const formData = new FormData();
-  formData.append("file", fileInput);
-  formData.append("akademik", JSON.stringify({matematika: 88, ipa: 85}));
-  formData.append("talent", JSON.stringify({logika: 8, teknologi: 9}));
+Mengembalikan:
+  - profil_karakter      : Big Five + RIASEC
+  - analisis_akademik    : Rumpun Ilmu + nilai
+  - rekomendasi_jurusan  : TOP-3 Program Studi
+  - fitur_tulisan        : 10 fitur numerik tulisan
+  - kelengkapan_data     : status field input
 
-  const res = await fetch("/predict", { method: "POST", body: formData });
-  const result = await res.json();
+CONTOH LARAVEL:
+  $response = Http::withOptions(['proxy' => ''])
+      ->attach('file', file_get_contents($path), 'tulisan.jpg')
+      ->post('http://localhost:8000/predict', [
+          'akademik' => json_encode([
+              'mat_s4' => 90, 'fis_s4' => 85, 'info_s4' => 95,
+              'mat_s5' => 88, 'info_s5' => 92,
+          ]),
+          'talent' => json_encode([
+              'logika_mat' => 16, 'spasial' => 14,
+          ]),
+      ]);
 =============================================================
 """
 
 import json
 import logging
-from fastapi import APIRouter, File, Form, UploadFile, HTTPException, Request
-from fastapi.responses import JSONResponse
 from typing import Optional
 
-from api.schemas import PredictionResponse, AkademikInput, TalentInput, ErrorResponse
+from fastapi import APIRouter, File, Form, UploadFile, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from api.schemas import (
+    PredictResponse, AkademikInput, TalentInput,
+    build_predict_response,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+ALLOWED_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+
 
 @router.post(
     "/predict",
-    response_model=PredictionResponse,
+    response_model=PredictResponse,
     tags=["Prediksi"],
-    summary="Analisis Tulisan Tangan → Karakter + Rekomendasi Jurusan",
-    responses={
-        200: {"description": "Berhasil", "model": PredictionResponse},
-        400: {"description": "Input tidak valid", "model": ErrorResponse},
-        500: {"description": "Error server", "model": ErrorResponse},
-    },
+    summary="Analisis tulisan tangan → Profil karakter + Rekomendasi jurusan",
 )
 async def predict_handwriting(
     request: Request,
     file: UploadFile = File(
         ...,
-        description="Gambar tulisan tangan siswa (.png atau .jpg, maks 10MB)"
+        description="Gambar tulisan tangan siswa (.jpg / .png, maks 10MB)",
     ),
     akademik: Optional[str] = Form(
         None,
-        description='JSON nilai akademik, contoh: {"matematika": 88, "ipa": 85}'
+        description=(
+            "JSON nilai 14 mata pelajaran (opsional). "
+            'Contoh: {"mat_s4":90,"fis_s4":85,"info_s4":95,'
+            '"mat_s5":88,"fis_s5":82,"info_s5":92}'
+        ),
     ),
     talent: Optional[str] = Form(
         None,
-        description='JSON skor bakat, contoh: {"logika": 8, "teknologi": 9}'
+        description=(
+            "JSON skor kecerdasan Gardner (opsional). "
+            'Contoh: {"logika_mat":16,"spasial":14,"interpersonal":12}'
+        ),
     ),
 ):
     """
     ## Analisis Tulisan Tangan Siswa
 
     Upload gambar tulisan tangan untuk mendapatkan:
-    1. **Profil karakter** siswa (tipe RIASEC + deskripsi)
-    2. **Skor RIASEC** (persentase tiap tipe kepribadian)
-    3. **Top-3 rekomendasi jurusan** + alasan personal
-    4. **Fitur tulisan** yang diekstrak dari gambar
 
-    ### Input:
-    - **file**: gambar tulisan tangan (.png / .jpg)
-    - **akademik** *(opsional)*: nilai rapor sebagai JSON
-    - **talent** *(opsional)*: skor bakat sebagai JSON
+    1. **Profil karakter RIASEC** — tipe kepribadian + deskripsi + kekuatan
+    2. **Profil Big Five** — 5 dimensi kepribadian dari analisis tulisan
+    3. **Analisis akademik** — Rumpun Ilmu yang cocok + nilai tertinggi
+    4. **Top-3 rekomendasi Program Studi** — + alasan + estimasi IPK
+    5. **10 fitur tulisan tangan** — hasil ekstraksi OpenCV
 
-    ### Contoh penggunaan (JavaScript/fetch):
-    ```javascript
-    const formData = new FormData();
-    formData.append("file", fileInput.files[0]);
-    formData.append("akademik", JSON.stringify({ matematika: 88, ipa: 85 }));
-    formData.append("talent", JSON.stringify({ logika: 8, teknologi: 9 }));
+    ---
 
-    const response = await fetch("http://localhost:8000/predict", {
-        method: "POST",
-        body: formData
-    });
-    const hasil = await response.json();
-    console.log(hasil.karakter.nama);            // "Analitis & Ilmiah"
-    console.log(hasil.rekomendasi_jurusan[0]);   // { rank: 1, jurusan: "Informatika", ... }
-    ```
+    ### Keys untuk field `akademik` (JSON):
+    | Key | Keterangan |
+    |-----|-----------|
+    | mat_s4 / mat_s5 | Matematika Semester 4 / 5 |
+    | fis_s4 / fis_s5 | Fisika Semester 4 / 5 |
+    | kim_s4 / kim_s5 | Kimia Semester 4 / 5 |
+    | bio_s4 / bio_s5 | Biologi Semester 4 / 5 |
+    | bind_s4 / bind_s5 | Bahasa Indonesia Semester 4 / 5 |
+    | bing_s4 / bing_s5 | Bahasa Inggris Semester 4 / 5 |
+    | info_s4 / info_s5 | Informatika Semester 4 / 5 |
 
-    ### Contoh penggunaan (PHP / Laravel):
-    ```php
-    $response = Http::attach('file', file_get_contents($path), 'tulisan.png')
-        ->post('http://localhost:8000/predict', [
-            'akademik' => json_encode(['matematika' => 88, 'ipa' => 85]),
-            'talent'   => json_encode(['logika' => 8, 'teknologi' => 9]),
-        ]);
-    $hasil = $response->json();
-    ```
+    ### Keys untuk field `talent` (JSON):
+    | Key | Keterangan |
+    |-----|-----------|
+    | linguistik | Kecerdasan bahasa |
+    | musikal | Kecerdasan musik |
+    | kinestetik | Kecerdasan fisik/gerak |
+    | logika_mat | Kecerdasan logika-matematika |
+    | spasial | Kecerdasan ruang/visual |
+    | interpersonal | Kecerdasan sosial |
+    | intrapersonal | Kecerdasan refleksi diri |
+    | naturalis | Kecerdasan alam |
     """
 
-    # ------------------------------------------------------------------
-    # Validasi file
-    # ------------------------------------------------------------------
-    if file.content_type not in ("image/png", "image/jpeg", "image/jpg", "image/webp"):
+    # --- Validasi file ---
+    if file.content_type not in ALLOWED_TYPES:
         raise HTTPException(
             status_code=400,
-            detail=f"Format file tidak didukung: {file.content_type}. Gunakan PNG atau JPG."
+            detail=f"Format file tidak didukung: {file.content_type}. Gunakan JPG atau PNG.",
         )
 
-    MAX_SIZE = 10 * 1024 * 1024  # 10 MB
     image_bytes = await file.read()
-    if len(image_bytes) > MAX_SIZE:
+
+    if len(image_bytes) > MAX_SIZE_BYTES:
         raise HTTPException(
             status_code=400,
-            detail=f"Ukuran file terlalu besar: {len(image_bytes)//1024}KB. Maks 10MB."
+            detail=f"Ukuran file terlalu besar ({len(image_bytes)//1024}KB). Maks 10MB.",
         )
 
     if len(image_bytes) < 100:
         raise HTTPException(status_code=400, detail="File gambar terlalu kecil atau kosong.")
 
-    # ------------------------------------------------------------------
-    # Parse JSON opsional
-    # ------------------------------------------------------------------
+    # --- Parse JSON opsional ---
     akademik_dict = None
-    talent_dict = None
+    talent_dict   = None
 
     if akademik:
         try:
-            raw = json.loads(akademik)
-            akademik_dict = AkademikInput(**raw).to_dict()
+            akademik_dict = AkademikInput(**json.loads(akademik)).to_dict()
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Format JSON 'akademik' tidak valid.")
         except Exception as e:
@@ -141,91 +147,122 @@ async def predict_handwriting(
 
     if talent:
         try:
-            raw = json.loads(talent)
-            talent_dict = TalentInput(**raw).to_dict()
+            talent_dict = TalentInput(**json.loads(talent)).to_dict()
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Format JSON 'talent' tidak valid.")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Data talent tidak valid: {e}")
 
-    # ------------------------------------------------------------------
-    # Jalankan prediksi
-    # ------------------------------------------------------------------
+    # --- Prediksi ---
     predictor = request.app.state.predictor
 
     if not predictor.is_ready:
         raise HTTPException(
             status_code=503,
-            detail="Model ML belum siap. Jalankan training terlebih dahulu: python train_and_save.py"
+            detail=(
+                "Model ML belum siap. Jalankan dulu: "
+                "cd ml-handwriting && python train_and_save.py"
+            ),
         )
 
     try:
-        result = predictor.predict(
+        raw = predictor.predict(
             image_bytes=image_bytes,
-            akademik=akademik_dict,
-            talent=talent_dict,
+            academic_scores=akademik_dict,
+            talent_scores=talent_dict,
         )
+        response = build_predict_response(raw)
         logger.info(
-            f"Prediksi berhasil: RIASEC={result['karakter']['tipe']}, "
-            f"Jurusan={result['rekomendasi_jurusan'][0]['jurusan']}"
+            f"Prediksi OK — "
+            f"BigFive={response.big_five.dominant}  "
+            f"RIASEC={response.profil_karakter.dominant}  "
+            f"Rumpun={response.analisis_akademik.rumpun_ilmu}  "
+            f"Top1={response.rekomendasi_jurusan[0].program_studi if response.rekomendasi_jurusan else '-'}"
         )
-        return result
+        return response
 
     except Exception as e:
-        logger.exception(f"Error saat prediksi: {e}")
+        logger.exception(f"Error prediksi: {e}")
         raise HTTPException(status_code=500, detail=f"Error prediksi: {str(e)}")
 
 
 @router.get(
     "/predict/demo",
     tags=["Prediksi"],
-    summary="Demo prediksi tanpa upload gambar (untuk testing)",
+    summary="Contoh respons tanpa upload (untuk testing Laravel)",
 )
-async def predict_demo(request: Request):
+async def predict_demo():
     """
-    Demo endpoint yang mengembalikan contoh respons tanpa membutuhkan gambar.
+    Kembalikan contoh respons lengkap tanpa upload gambar.
     Berguna untuk web dev testing integrasi sebelum model siap.
     """
     return {
-        "status": "demo",
-        "pesan": "Ini adalah contoh respons. Gunakan POST /predict untuk prediksi nyata.",
-        "karakter": {
-            "tipe": "Investigative",
-            "nama": "Analitis & Ilmiah",
-            "deskripsi": "Kamu adalah pemikir mendalam yang suka menganalisis, meneliti, dan memecahkan masalah kompleks.",
-            "kekuatan": ["Kemampuan analisis kuat", "Berpikir logis & sistematis", "Rasa ingin tahu tinggi"],
+        "status": "demo — gunakan POST /predict untuk prediksi nyata",
+        "profil_karakter": {
+            "dominant": "Investigative",
+            "karakter": "Analitis & Ilmiah",
+            "deskripsi": "Kamu pemikir mendalam yang suka menganalisis...",
+            "kekuatan": ["Kemampuan analisis kuat", "Berpikir logis", "Rasa ingin tahu tinggi"],
             "warna": "#2980B9",
+            "skor": {
+                "Investigative": 38.5, "Conventional": 20.1, "Realistic": 15.3,
+                "Artistic": 12.0, "Social": 9.1, "Enterprising": 5.0,
+            },
         },
-        "riasec_skor": {
-            "Investigative": 0.45,
-            "Conventional": 0.22,
-            "Realistic": 0.13,
-            "Artistic": 0.09,
-            "Social": 0.07,
-            "Enterprising": 0.04,
+        "big_five": {
+            "dominant": "Conscientiousness",
+            "skor": {
+                "Openness": 5.1, "Conscientiousness": 7.8, "Extraversion": 4.2,
+                "Agreeableness": 5.5, "Neuroticism": 3.9,
+            },
+            "probabilitas": {
+                "Conscientiousness": 45.2, "Openness": 22.1, "Agreeableness": 18.0,
+                "Neuroticism": 8.7, "Extraversion": 6.0,
+            },
+        },
+        "analisis_akademik": {
+            "rumpun_ilmu": "STEM",
+            "rumpun_probabilitas": {
+                "STEM": 62.5, "Bisnis Manajemen": 18.0, "Sosial Humaniora": 10.5,
+                "Pendidikan": 6.0, "Seni Kreatif": 3.0,
+            },
+            "nilai_rata_rata": 88.5,
+            "mata_pelajaran_kuat": [
+                {"mata_pelajaran": "Informatika Smt 5", "nilai": 95.0},
+                {"mata_pelajaran": "Matematika Smt 5", "nilai": 92.0},
+                {"mata_pelajaran": "Matematika Smt 4", "nilai": 90.0},
+            ],
         },
         "rekomendasi_jurusan": [
-            {"rank": 1, "jurusan": "Informatika", "match_score": 87.3, "alasan": "Kemampuan analitismu sangat cocok untuk pemrograman dan AI"},
-            {"rank": 2, "jurusan": "Statistik", "match_score": 72.1, "alasan": "Kamu suka pola dan data – statistik adalah duniamu"},
-            {"rank": 3, "jurusan": "Sistem Informasi", "match_score": 65.8, "alasan": "Kamu menyukai sistem yang teratur – SI adalah pilihan tepat"},
+            {
+                "program_studi": "S1 Teknik Informatika",
+                "rumpun_ilmu": "STEM",
+                "alasan": "Profil Analitis & Ilmiah sangat sesuai bidang STEM...",
+                "skor_kesesuaian": 4.6,
+                "prediksi_ipk": "3.3 – 3.7",
+            },
+            {
+                "program_studi": "S1 Statistika",
+                "rumpun_ilmu": "STEM",
+                "alasan": "Kecerdasan logika-matematika tinggi cocok untuk Statistika.",
+                "skor_kesesuaian": 4.1,
+                "prediksi_ipk": "3.1 – 3.5",
+            },
+            {
+                "program_studi": "S1 Sistem Informasi",
+                "rumpun_ilmu": "STEM",
+                "alasan": "Kombinasi teknis dan analitis ideal untuk Sistem Informasi.",
+                "skor_kesesuaian": 3.9,
+                "prediksi_ipk": "3.0 – 3.4",
+            },
         ],
         "fitur_tulisan": {
-            "letter_size_score": 4.2,
-            "slant_angle": 5.1,
-            "pressure_score": 6.3,
-            "spacing_score": 4.8,
-            "readability_score": 7.2,
-            "neatness_score": 8.1,
-            "connectivity_score": 3.4,
-            "ornament_score": 1.2,
-            "line_straightness": 8.5,
-            "density_score": 5.0,
+            "letter_size": 4.2, "slant": 5.1, "pressure": 6.3,
+            "spacing": 4.8, "readability": 7.2, "neatness": 8.1,
+            "connectivity": 3.4, "ornament": 1.2, "baseline": 8.5, "density": 5.0,
         },
-        "feature_importance": [
-            {"fitur": "conventional", "importance": 0.1832},
-            {"fitur": "investigative", "importance": 0.1654},
-            {"fitur": "neatness_score", "importance": 0.1102},
-            {"fitur": "matematika", "importance": 0.0943},
-            {"fitur": "logika_t", "importance": 0.0871},
-        ],
+        "kelengkapan_data": {
+            "akademik": "demo",
+            "talent": "demo",
+        },
     }

@@ -1,332 +1,308 @@
 """
 =============================================================
-MODUL: major_recommender.py
+MODUL: major_recommender.py  (Dataset Real v2)
 =============================================================
-TUJUAN:
-  Merekomendasikan TOP-3 jurusan kuliah berdasarkan gabungan:
-  - Tipe RIASEC (karakter siswa)
-  - Probabilitas RIASEC dari model
-  - Nilai akademik
-  - Skor bakat
+Merekomendasikan TOP-3 Program Studi dari:
+  - RIASEC dominant (dari analisis tulisan tangan)
+  - Rumpun Ilmu (dari nilai akademik)
+  - Skor kecerdasan Gardner (opsional)
+  - Rata-rata nilai akademik (sebagai tiebreaker)
 
-PENDEKATAN:
-  Multi-label → ambil probabilitas tiap jurusan → Top 3
-
-KENAPA TIDAK HANYA 1 JURUSAN?
-  Karena kepribadian manusia kompleks. Seorang siswa dengan
-  RIASEC "Investigative" tapi nilai Seni tinggi perlu
-  alternatif seperti Arsitektur selain Informatika.
+Dataset sumber: Dataset_AkademikN.xlsx (140 siswa, 82 Program Studi)
+Strategi:
+  1. Filter Program Studi berdasarkan Rumpun Ilmu yang diprediksi
+  2. Skor tambahan dari RIASEC → Rumpun Ilmu affinity
+  3. Tiebreaker: rata-rata Tingkat Kesesuaian di dataset asli
 =============================================================
 """
 
+import os
+import json
+import logging
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import cross_val_score, StratifiedKFold
-from sklearn.multiclass import OneVsRestClassifier
 import joblib
-import os
-import logging
-from typing import List, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
+
+from src.preprocessing.data_loader import (
+    RIASEC_TO_RUMPUN, RIASEC_DESCRIPTIONS,
+    RUMPUN_NORM, BIG_FIVE_TYPES,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------------
-# Mapping RIASEC → Jurusan (rule-based fallback)
-# ------------------------------------------------------------------
-RIASEC_TO_MAJORS: Dict[str, List[Dict]] = {
-    "Realistic": [
-        {"jurusan": "Teknik Sipil",      "alasan": "Kamu suka pekerjaan fisik dan membangun sesuatu yang nyata"},
-        {"jurusan": "Teknik Mesin",      "alasan": "Kemampuan teknismu cocok dengan rekayasa mekanis"},
-        {"jurusan": "Teknik Elektro",    "alasan": "Ketelitian dan kepraktisanmu sesuai dengan teknik kelistrikan"},
-        {"jurusan": "Arsitektur",        "alasan": "Kamu bisa menggabungkan keahlian teknis dengan estetika"},
-        {"jurusan": "Teknik Industri",   "alasan": "Kamu ahli mengoptimalkan proses kerja secara praktis"},
+# Daftar Program Studi per Rumpun Ilmu
+# (dibangun otomatis dari dataset, tapi ada hardcode fallback)
+DEFAULT_PRODI_RUMPUN: Dict[str, List[str]] = {
+    "STEM": [
+        "S1 Teknik Informatika", "D4 Teknik Informatika", "S1 Sistem Informasi",
+        "S1 Matematika", "S1 Statistika", "S1 Kimia", "S1 Biologi",
+        "S1 Teknik Sipil", "S1 Teknik Industri", "S1 Teknik Lingkungan",
+        "S1 Teknik Biomedis", "S1 Teknik Geologi", "S1 Ilmu Keolahragaan",
+        "S1 Ilmu Kesehatan Masyarakat", "S1 Kesehatan Masyarakat",
+        "S1 Farmasi", "D3 Farmasi", "D3 Asuransi Kesehatan",
+        "S1 Agroekoteknologi", "S1 Perencanaan Wilayah dan Kota",
+        "S1 Pend Teknik Elektro",
     ],
-    "Investigative": [
-        {"jurusan": "Informatika",       "alasan": "Kemampuan analitismu sangat cocok untuk pemrograman dan AI"},
-        {"jurusan": "Kedokteran",        "alasan": "Rasa ingin tahumu yang tinggi sempurna untuk ilmu medis"},
-        {"jurusan": "Farmasi",           "alasan": "Kamu teliti dan suka menyelidiki – ideal untuk kimia farmasi"},
-        {"jurusan": "Biologi",           "alasan": "Penasaranmu terhadap alam cocok dengan penelitian biologi"},
-        {"jurusan": "Statistik",         "alasan": "Kamu suka pola dan data – statistik adalah duniamu"},
+    "Sosial Humaniora": [
+        "S1 Ilmu Komunikasi", "S1 Psikologi", "S1 Sosiologi",
+        "S1 Antropologi", "S1 Hukum", "S1 Ilmu Sejarah",
+        "S1 Sastra Inggris", "S1 Hubungan Internasional",
+        "S1 Pendidikan Bahasa Indonesia", "S1 Pendidikan Bahasa Inggris",
+        "S1 Pendidikan Bahasa Arab",
     ],
-    "Artistic": [
-        {"jurusan": "DKV",               "alasan": "Kreativitas visualmu sangat cocok untuk Desain Komunikasi Visual"},
-        {"jurusan": "Arsitektur",        "alasan": "Kamu bisa menuangkan kreativitas dalam desain bangunan"},
-        {"jurusan": "Ilmu Komunikasi",   "alasan": "Kemampuan ekspresif dan kreatifmu ideal untuk komunikasi media"},
-        {"jurusan": "Sastra Inggris",    "alasan": "Kamu punya kepekaan bahasa dan estetika yang tinggi"},
-        {"jurusan": "Seni Rupa",         "alasan": "Kamu lahir untuk mengekspresikan diri melalui karya seni"},
+    "Bisnis Manajemen": [
+        "S1 Manajemen", "S1 Akuntansi", "S1 Bisnis Digital",
+        "S1 Administrasi Bisnis", "S1 Manajemen Bisnis",
+        "D4 Perbankan", "D3 Kesekretariatan",
     ],
-    "Social": [
-        {"jurusan": "Psikologi",         "alasan": "Empatimu yang tinggi membuat kamu cocok memahami perilaku manusia"},
-        {"jurusan": "Pendidikan",        "alasan": "Jiwa mengajar dan membantumu sangat tepat untuk dunia pendidikan"},
-        {"jurusan": "Ilmu Komunikasi",   "alasan": "Kamu pandai berinteraksi – komunikasi adalah kekuatanmu"},
-        {"jurusan": "Kesehatan Masyarakat", "alasan": "Kepedulianmu pada orang cocok untuk bidang kesehatan masyarakat"},
-        {"jurusan": "Sosiologi",         "alasan": "Kamu suka memahami pola sosial dan perilaku kelompok"},
+    "Pendidikan": [
+        "S1 Pendidikan Guru Sekolah Dasar", "S1 Bimbingan dan Konseling",
+        "S1 Manajemen Pendidikan", "S1 Teknologi Pendidikan",
+        "S1 Pendidikan IPA", "S1 Pendidikan Ekonomi",
+        "S1 Pendidikan Sejarah", "S1 Pendidikan Olahraga",
+        "S1 Pendidikan Jasmani", "S1 Pendidikan Agama Islam",
+        "S1 Pendidikan Guru Pendidikan Anak Usia Dini",
     ],
-    "Enterprising": [
-        {"jurusan": "Manajemen",         "alasan": "Jiwa kepemimpinanmu cocok untuk mengelola organisasi"},
-        {"jurusan": "Hukum",             "alasan": "Kemampuan persuasi dan argumenmu ideal di bidang hukum"},
-        {"jurusan": "Bisnis Internasional", "alasan": "Ambisimu dan visi globalmu cocok untuk bisnis internasional"},
-        {"jurusan": "Kewirausahaan",     "alasan": "Kamu lahir untuk membangun bisnis dan menciptakan peluang"},
-        {"jurusan": "Ilmu Politik",      "alasan": "Kemampuan leadership dan persuasimu cocok di dunia politik"},
+    "Seni Kreatif": [
+        "S1 Desain Komunikasi Visual", "S1 Seni Rupa Murni",
+        "S1 Sendratasik", "D4 Seni Kuliner",
     ],
-    "Conventional": [
-        {"jurusan": "Akuntansi",         "alasan": "Ketelitian dan kerapianmu sangat cocok untuk akuntansi"},
-        {"jurusan": "Sistem Informasi",  "alasan": "Kamu menyukai sistem yang teratur – SI adalah pilihan tepat"},
-        {"jurusan": "Administrasi Bisnis", "alasan": "Kemampuan organisasimu ideal untuk mengelola bisnis"},
-        {"jurusan": "Matematika",        "alasan": "Kecermatan dan logikamu sangat kuat untuk matematika"},
-        {"jurusan": "Perpustakaan & Informasi", "alasan": "Kamu suka mengelola dan mengorganisasi informasi"},
-    ],
+}
+
+# RIASEC → Rumpun yang paling cocok dengan bobot (berurutan dari terbaik)
+RIASEC_RUMPUN_AFFINITY: Dict[str, List[Tuple[str, float]]] = {
+    "Realistic":      [("STEM", 0.9), ("Bisnis Manajemen", 0.4), ("Sosial Humaniora", 0.2)],
+    "Investigative":  [("STEM", 0.9), ("Sosial Humaniora", 0.5), ("Pendidikan", 0.3)],
+    "Artistic":       [("Seni Kreatif", 0.9), ("Sosial Humaniora", 0.5), ("Pendidikan", 0.3)],
+    "Social":         [("Pendidikan", 0.9), ("Sosial Humaniora", 0.7), ("Bisnis Manajemen", 0.4)],
+    "Enterprising":   [("Bisnis Manajemen", 0.9), ("Sosial Humaniora", 0.5), ("STEM", 0.3)],
+    "Conventional":   [("Bisnis Manajemen", 0.9), ("STEM", 0.6), ("Pendidikan", 0.3)],
 }
 
 
 class MajorRecommender:
     """
-    Merekomendasikan TOP-3 jurusan berdasarkan kombinasi:
-    - Prediksi ML (model terlatih)
-    - Rule-based RIASEC mapping
-    - Skor akademik sebagai bobot penyesuaian
-
-    Cara pakai:
-        rec = MajorRecommender()
-        rec.train(X_train, y_major_train)
-        top3 = rec.recommend_top3(X_input, riasec_proba)
+    Merekomendasikan TOP-3 Program Studi berdasarkan kombinasi:
+      - RIASEC dominant
+      - Rumpun Ilmu dari nilai akademik
+      - Profil kecerdasan Gardner (opsional)
+      - Rata-rata nilai akademik (tiebreaker)
     """
 
-    def __init__(self, random_state: int = 42):
-        self.label_encoder = LabelEncoder()
-        self.feature_names: List[str] = []
+    def __init__(self):
+        # Mapping: rumpun → list program studi + metadata
+        self._prodi_data: Dict[str, List[Dict]] = {}
+        # Mapping: program studi → rumpun
+        self._prodi_to_rumpun: Dict[str, str] = {}
+        # Rata-rata tingkat kesesuaian per program studi (dari dataset)
+        self._prodi_avg_score: Dict[str, float] = {}
 
-        self.pipeline = Pipeline([
-            ("scaler", StandardScaler()),
-            ("classifier", RandomForestClassifier(
-                n_estimators=200,
-                max_depth=8,
-                class_weight="balanced",
-                random_state=random_state,
-                n_jobs=-1,
-            )),
-        ])
+    @property
+    def n_programs(self) -> int:
+        return sum(len(v) for v in self._prodi_data.values())
 
-    # ------------------------------------------------------------------
-    # TRAIN
-    # ------------------------------------------------------------------
-    def train(self, X: pd.DataFrame, y: pd.Series) -> Dict:
+    def build_from_dataset(self, df: pd.DataFrame) -> None:
         """
-        Latih model rekomendasi jurusan.
+        Bangun index Program Studi dari DataFrame akademik.
 
         Args:
-            X: DataFrame fitur
-            y: Series label jurusan (misal "Informatika", "Akuntansi")
-
-        Returns:
-            dict metrik pelatihan
+            df: DataFrame hasil DatasetLoader.load_akademik()
+                Kolom: rumpun_ilmu, program_studi, tingkat_kesesuaian
         """
-        self.feature_names = list(X.columns)
-        y_encoded = self.label_encoder.fit_transform(y)
+        # Rata-rata tingkat kesesuaian per program studi
+        avg_score = (
+            df.groupby("program_studi")["tingkat_kesesuaian"]
+            .mean()
+            .round(2)
+            .to_dict()
+        )
+        self._prodi_avg_score = avg_score
 
-        logger.info(f"Training Major Recommender: {X.shape}, {len(np.unique(y_encoded))} jurusan")
+        # Group program studi per rumpun
+        grouped = df.groupby("rumpun_ilmu")["program_studi"].unique()
 
-        self.pipeline.fit(X, y_encoded)
-        y_pred = self.pipeline.predict(X)
+        self._prodi_data = {}
+        self._prodi_to_rumpun = {}
 
-        from sklearn.metrics import accuracy_score
-        train_acc = accuracy_score(y_encoded, y_pred)
+        for rumpun, prodis in grouped.items():
+            rumpun_key = rumpun.strip()
+            self._prodi_data[rumpun_key] = []
+            for prodi in sorted(set(prodis)):
+                prodi = prodi.strip()
+                score = avg_score.get(prodi, 3.0)
+                self._prodi_data[rumpun_key].append({
+                    "program_studi": prodi,
+                    "avg_kesesuaian": score,
+                })
+                self._prodi_to_rumpun[prodi] = rumpun_key
 
-        # Cross-validation hanya bisa jika setiap kelas punya ≥2 sampel
-        min_class_count = int(np.bincount(y_encoded).min())
-        n_splits = min(5, min_class_count)
+        # Tambahkan program dari hardcode default yang tidak ada di dataset
+        for rumpun, prodis in DEFAULT_PRODI_RUMPUN.items():
+            if rumpun not in self._prodi_data:
+                self._prodi_data[rumpun] = []
+            existing = {d["program_studi"] for d in self._prodi_data[rumpun]}
+            for prodi in prodis:
+                if prodi not in existing:
+                    self._prodi_data[rumpun].append({
+                        "program_studi": prodi,
+                        "avg_kesesuaian": 3.5,
+                    })
+                    self._prodi_to_rumpun[prodi] = rumpun
 
-        cv_mean, cv_std = 0.0, 0.0
-        if n_splits >= 2:
-            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-            cv_scores = cross_val_score(self.pipeline, X, y_encoded, cv=cv, scoring="accuracy")
-            cv_mean = round(cv_scores.mean(), 4)
-            cv_std = round(cv_scores.std(), 4)
-            logger.info(f"CV Major ({n_splits}-fold): {cv_mean:.3f} ± {cv_std:.3f}")
-        else:
-            logger.warning(
-                f"Dataset jurusan terlalu sedikit per kelas (min={min_class_count}) "
-                f"untuk cross-validation. Menggunakan train accuracy saja."
-            )
-            cv_mean = round(train_acc, 4)
-            cv_std = 0.0
+        logger.info(f"MajorRecommender: {self.n_programs} program studi dari "
+                    f"{len(self._prodi_data)} rumpun")
 
-        metrics = {
-            "train_accuracy": round(train_acc, 4),
-            "cv_accuracy_mean": cv_mean,
-            "cv_accuracy_std": cv_std,
-            "jurusan_tersedia": list(self.label_encoder.classes_),
-            "n_jurusan": len(self.label_encoder.classes_),
-        }
-
-        logger.info(f"Major Rec accuracy: {train_acc:.3f}, CV: {cv_mean:.3f}")
-        return metrics
-
-    # ------------------------------------------------------------------
-    # RECOMMEND TOP-3
-    # ------------------------------------------------------------------
-    def recommend_top3(
+    def recommend(
         self,
-        X: pd.DataFrame,
-        riasec_type: str,
-        riasec_proba: Dict[str, float],
-        akademik_scores: Dict[str, float] = None,
+        riasec_dominant: str,
+        rumpun_ilmu: str,
+        riasec_proba: Optional[Dict[str, float]] = None,
+        avg_nilai: float = 80.0,
+        top_n: int = 3,
     ) -> List[Dict]:
         """
-        Menghasilkan 3 rekomendasi jurusan dengan alasan.
-
-        Strategi hybrid:
-        1. ML model → probabilitas tiap jurusan (jika model tersedia)
-        2. Rule-based RIASEC → bobot tambahan untuk jurusan sesuai tipe
-        3. Akademik → bobot tambahan untuk jurusan yang butuh nilai tinggi
-        4. Ambil Top-3 berdasarkan skor gabungan
+        Rekomendasikan TOP-N Program Studi.
 
         Args:
-            X: DataFrame fitur siswa
-            riasec_type: tipe RIASEC dominan (misalnya "Investigative")
-            riasec_proba: probabilitas tiap tipe RIASEC
-            akademik_scores: nilai akademik (opsional, untuk penyesuaian)
+            riasec_dominant: tipe RIASEC utama siswa
+            rumpun_ilmu    : prediksi Rumpun Ilmu dari nilai akademik
+            riasec_proba   : dict probabilitas RIASEC (opsional)
+            avg_nilai      : rata-rata nilai akademik (70-100)
+            top_n          : jumlah rekomendasi
 
         Returns:
-            List[Dict] berisi 3 jurusan dengan nama, skor, dan alasan
+            List of dict dengan key:
+              program_studi, rumpun_ilmu, alasan, skor_kesesuaian,
+              prediksi_nilai (estimasi IPK awal)
         """
-        # Skor dari ML model (probabilitas)
-        ml_scores = self._get_ml_scores(X)
+        if not self._prodi_data:
+            return self._fallback_recommend(riasec_dominant, top_n)
 
-        # Skor dari aturan RIASEC
-        rule_scores = self._get_rule_scores(riasec_proba)
+        # Kumpulkan semua program studi dengan skor
+        scored: List[Tuple[str, str, float]] = []  # (prodi, rumpun, skor)
 
-        # Gabungkan: 60% ML + 40% rule-based
-        combined = {}
-        all_jurusan = set(list(ml_scores.keys()) + list(rule_scores.keys()))
-        for jurusan in all_jurusan:
-            ml = ml_scores.get(jurusan, 0.0)
-            rule = rule_scores.get(jurusan, 0.0)
-            combined[jurusan] = 0.6 * ml + 0.4 * rule
+        for rumpun, prodis in self._prodi_data.items():
+            # Bobot affinitas RIASEC → Rumpun
+            riasec_affinity = self._riasec_rumpun_score(riasec_dominant, rumpun)
+            # Bonus jika rumpun cocok dengan prediksi akademik
+            rumpun_match_bonus = 0.3 if rumpun == rumpun_ilmu else 0.0
 
-        # Penyesuaian akademik (opsional)
-        if akademik_scores:
-            combined = self._apply_akademik_boost(combined, akademik_scores)
+            for prodi_meta in prodis:
+                prodi = prodi_meta["program_studi"]
+                base_score = prodi_meta.get("avg_kesesuaian", 3.0) / 5.0  # norm ke 0-1
 
-        # Urutkan dan ambil Top-3
-        sorted_jurusan = sorted(combined.items(), key=lambda x: -x[1])[:3]
+                # Skor akhir
+                final_score = (
+                    0.40 * riasec_affinity      +   # kecocokan RIASEC
+                    0.30 * rumpun_match_bonus   +   # kecocokan nilai akademik
+                    0.20 * base_score           +   # tingkat kesesuaian dataset
+                    0.10 * (avg_nilai / 100.0)      # pengaruh nilai rata-rata
+                )
 
-        # Tambahkan alasan (dari rule-based RIASEC)
-        result = []
-        rule_majors = {m["jurusan"]: m["alasan"] for m in RIASEC_TO_MAJORS.get(riasec_type, [])}
+                # Bonus tambahan dari probabilitas RIASEC jika ada
+                if riasec_proba:
+                    for r_type, r_score in riasec_proba.items():
+                        affinity = self._riasec_rumpun_score(r_type, rumpun)
+                        final_score += 0.05 * r_score * affinity
 
-        for rank, (jurusan, score) in enumerate(sorted_jurusan, 1):
-            alasan = rule_majors.get(
-                jurusan,
-                f"Kombinasi kemampuan dan minatmu sangat sesuai dengan {jurusan}"
-            )
-            result.append({
-                "rank": rank,
-                "jurusan": jurusan,
-                "match_score": round(score * 100, 1),  # konversi ke persen
-                "alasan": alasan,
+                scored.append((prodi, rumpun, final_score))
+
+        # Sort dan ambil top_n tanpa duplikat per rumpun
+        scored.sort(key=lambda x: -x[2])
+
+        results = []
+        seen_rumpun = {}
+        for prodi, rumpun, skor in scored:
+            if len(results) >= top_n:
+                break
+            seen_count = seen_rumpun.get(rumpun, 0)
+            if seen_count >= 2:
+                continue
+            seen_rumpun[rumpun] = seen_count + 1
+            results.append({
+                "program_studi":  prodi,
+                "rumpun_ilmu":    rumpun,
+                "alasan":         self._generate_reason(prodi, rumpun, riasec_dominant, avg_nilai),
+                "skor_kesesuaian": round(min(skor * 5, 5.0), 2),  # kembalikan ke skala 1-5
+                "prediksi_ipk":   self._estimate_ipk(avg_nilai, skor),
             })
 
-        return result
+        return results[:top_n]
 
     # ------------------------------------------------------------------
-    # Helper: ML Scores
+    # Internal helpers
     # ------------------------------------------------------------------
-    def _get_ml_scores(self, X: pd.DataFrame) -> Dict[str, float]:
-        """Dapatkan probabilitas dari model ML untuk tiap jurusan."""
-        try:
-            X_aligned = self._align_features(X)
-            proba = self.pipeline.predict_proba(X_aligned)[0]
-            classes = self.label_encoder.classes_
-            return {cls: float(p) for cls, p in zip(classes, proba)}
-        except Exception as e:
-            logger.warning(f"ML score error: {e}")
-            return {}
+    def _riasec_rumpun_score(self, riasec: str, rumpun: str) -> float:
+        """Skor affinitas RIASEC → Rumpun Ilmu (0.0 – 1.0)."""
+        affinities = RIASEC_RUMPUN_AFFINITY.get(riasec, [])
+        for rumpun_name, weight in affinities:
+            if rumpun_name == rumpun:
+                return weight
+        return 0.1
 
-    def _get_rule_scores(self, riasec_proba: Dict[str, float]) -> Dict[str, float]:
-        """
-        Hitung skor jurusan berdasarkan aturan RIASEC.
+    def _generate_reason(
+        self, prodi: str, rumpun: str, riasec: str, avg_nilai: float
+    ) -> str:
+        desc = RIASEC_DESCRIPTIONS.get(riasec, {})
+        karakter = desc.get("karakter", riasec)
+        nilai_ket = "sangat baik" if avg_nilai >= 90 else "baik" if avg_nilai >= 80 else "cukup"
+        return (
+            f"Profil {karakter} sangat sesuai dengan bidang {rumpun}. "
+            f"Dengan nilai akademik {nilai_ket} ({avg_nilai:.0f}), "
+            f"{prodi} menjadi pilihan yang kuat untuk pengembangan kariermu."
+        )
 
-        Setiap tipe RIASEC memiliki daftar jurusan yang cocok.
-        Bobot jurusan = probabilitas tipe RIASEC × (rank dari bawah / total jurusan)
-        """
-        scores = {}
-        for riasec_type, proba in riasec_proba.items():
-            majors = RIASEC_TO_MAJORS.get(riasec_type, [])
-            n = len(majors)
-            for rank, major_info in enumerate(majors):
-                jurusan = major_info["jurusan"]
-                # Jurusan di ranking atas (index 0) dapat bobot lebih tinggi
-                weight = (n - rank) / n
-                scores[jurusan] = scores.get(jurusan, 0.0) + proba * weight
+    def _estimate_ipk(self, avg_nilai: float, skor: float) -> str:
+        """Estimasi IPK awal berdasarkan nilai rata-rata dan skor kesesuaian."""
+        base = 2.0 + (avg_nilai - 70) / 30 * 1.5 + skor * 0.3
+        base = max(2.5, min(4.0, base))
+        lo = max(2.5, base - 0.25)
+        hi = min(4.0, base + 0.15)
+        return f"{lo:.1f} – {hi:.1f}"
 
-        # Normalisasi ke 0–1
-        if scores:
-            max_score = max(scores.values())
-            if max_score > 0:
-                scores = {k: v / max_score for k, v in scores.items()}
-
-        return scores
-
-    def _apply_akademik_boost(
-        self,
-        scores: Dict[str, float],
-        akademik: Dict[str, float]
-    ) -> Dict[str, float]:
-        """
-        Penyesuaian skor berdasarkan nilai akademik spesifik.
-
-        Contoh: nilai matematika tinggi → boost Informatika, Statistik
-        """
-        boosts = {
-            "Informatika":    ["matematika", "informatika", "logika"],
-            "Kedokteran":     ["ipa", "biologi", "kimia"],
-            "Akuntansi":      ["matematika", "ips", "numerasi"],
-            "DKV":            ["seni_budaya", "kreativitas"],
-            "Teknik Sipil":   ["matematika", "ipa", "fisika"],
-            "Ilmu Komunikasi":["bahasa_indonesia", "bahasa_inggris", "komunikasi"],
-            "Hukum":          ["pkn", "bahasa_indonesia", "literasi"],
-            "Psikologi":      ["biologi", "bahasa_indonesia", "komunikasi"],
+    def _fallback_recommend(self, riasec: str, top_n: int) -> List[Dict]:
+        """Fallback jika model belum dibangun dari dataset."""
+        fallback_map = {
+            "Realistic":      ["S1 Teknik Informatika", "S1 Teknik Sipil", "S1 Ilmu Keolahragaan"],
+            "Investigative":  ["S1 Matematika", "S1 Kimia", "S1 Psikologi"],
+            "Artistic":       ["S1 Desain Komunikasi Visual", "S1 Seni Rupa Murni", "S1 Ilmu Komunikasi"],
+            "Social":         ["S1 Pendidikan Guru Sekolah Dasar", "S1 Psikologi", "S1 Bimbingan dan Konseling"],
+            "Enterprising":   ["S1 Manajemen", "S1 Administrasi Bisnis", "S1 Hubungan Internasional"],
+            "Conventional":   ["S1 Akuntansi", "S1 Statistika", "S1 Sistem Informasi"],
         }
-
-        boosted = dict(scores)
-        for jurusan, relevant_subjects in boosts.items():
-            if jurusan in boosted:
-                avg_boost = np.mean([
-                    akademik.get(subj, 75) / 100
-                    for subj in relevant_subjects
-                    if akademik.get(subj) is not None
-                ] or [0])
-                # Boost maksimal 15% dari skor asli
-                boosted[jurusan] = boosted[jurusan] * (1 + 0.15 * avg_boost)
-
-        return boosted
+        prodis = fallback_map.get(riasec, ["S1 Manajemen", "S1 Psikologi", "S1 Ilmu Komunikasi"])
+        return [
+            {
+                "program_studi": p,
+                "rumpun_ilmu":   self._prodi_to_rumpun.get(p, "Umum"),
+                "alasan":        f"Rekomendasi berdasarkan profil RIASEC {riasec}.",
+                "skor_kesesuaian": 3.5,
+                "prediksi_ipk":  "3.0 – 3.5",
+            }
+            for p in prodis[:top_n]
+        ]
 
     # ------------------------------------------------------------------
-    # SAVE / LOAD
+    # Simpan / Muat
     # ------------------------------------------------------------------
-    def save(self, path: str):
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    def save(self, path: str) -> None:
+        if os.path.dirname(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
         joblib.dump({
-            "pipeline": self.pipeline,
-            "label_encoder": self.label_encoder,
-            "feature_names": self.feature_names,
-        }, path)
-        logger.info(f"Model Major Recommender disimpan: {path}")
+            "prodi_data":       self._prodi_data,
+            "prodi_to_rumpun":  self._prodi_to_rumpun,
+            "prodi_avg_score":  self._prodi_avg_score,
+        }, path, compress=3)
+        logger.info(f"MajorRecommender disimpan: {path}")
 
-    def load(self, path: str):
+    @classmethod
+    def load(cls, path: str) -> "MajorRecommender":
+        obj = cls()
         data = joblib.load(path)
-        self.pipeline = data["pipeline"]
-        self.label_encoder = data["label_encoder"]
-        self.feature_names = data["feature_names"]
-        logger.info(f"Model Major Recommender dimuat: {path}")
-
-    def _align_features(self, X: pd.DataFrame) -> pd.DataFrame:
-        for col in self.feature_names:
-            if col not in X.columns:
-                X[col] = 0.0
-        return X[self.feature_names]
+        obj._prodi_data      = data["prodi_data"]
+        obj._prodi_to_rumpun = data["prodi_to_rumpun"]
+        obj._prodi_avg_score = data.get("prodi_avg_score", {})
+        logger.info(f"MajorRecommender dimuat: {path} ({obj.n_programs} program)")
+        return obj
