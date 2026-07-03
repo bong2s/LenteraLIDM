@@ -1,23 +1,21 @@
 """
 =============================================================
-MODUL: major_recommender.py  (Dataset Real v2)
+MODUL: major_recommender.py  (Dataset Real v3 — RIASEC Direct)
 =============================================================
-Merekomendasikan TOP-3 Program Studi dari:
+Merekomendasikan Program Studi dari:
   - RIASEC dominant (dari analisis tulisan tangan)
   - Rumpun Ilmu (dari nilai akademik)
-  - Skor kecerdasan Gardner (opsional)
+  - Probabilitas RIASEC (opsional, sebagai bobot tambahan)
   - Rata-rata nilai akademik (sebagai tiebreaker)
+  - Status sejalan/berbeda antara RIASEC dan Rumpun Ilmu
 
-Dataset sumber: Dataset_AkademikN.xlsx (140 siswa, 82 Program Studi)
-Strategi:
-  1. Filter Program Studi berdasarkan Rumpun Ilmu yang diprediksi
-  2. Skor tambahan dari RIASEC → Rumpun Ilmu affinity
-  3. Tiebreaker: rata-rata Tingkat Kesesuaian di dataset asli
+Jumlah rekomendasi:
+  - sejalan (RIASEC cocok dengan Rumpun Ilmu) → TOP-3
+  - berbeda (RIASEC tidak cocok)              → TOP-5, lebih beragam
 =============================================================
 """
 
 import os
-import json
 import logging
 import numpy as np
 import pandas as pd
@@ -25,15 +23,13 @@ import joblib
 from typing import Dict, List, Optional, Tuple
 
 from src.preprocessing.data_loader import (
-    RIASEC_TO_RUMPUN, RIASEC_DESCRIPTIONS,
-    RUMPUN_NORM, BIG_FIVE_TYPES,
+    RIASEC_TO_RUMPUN, RIASEC_DESCRIPTIONS, RUMPUN_NORM,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# Daftar Program Studi per Rumpun Ilmu
-# (dibangun otomatis dari dataset, tapi ada hardcode fallback)
+# Daftar Program Studi per Rumpun Ilmu (hardcode fallback)
 DEFAULT_PRODI_RUMPUN: Dict[str, List[str]] = {
     "STEM": [
         "S1 Teknik Informatika", "D4 Teknik Informatika", "S1 Sistem Informasi",
@@ -71,32 +67,30 @@ DEFAULT_PRODI_RUMPUN: Dict[str, List[str]] = {
     ],
 }
 
-# RIASEC → Rumpun yang paling cocok dengan bobot (berurutan dari terbaik)
+# RIASEC → Rumpun dengan bobot affinitas (berurutan dari terbaik)
 RIASEC_RUMPUN_AFFINITY: Dict[str, List[Tuple[str, float]]] = {
-    "Realistic":      [("STEM", 0.9), ("Bisnis Manajemen", 0.4), ("Sosial Humaniora", 0.2)],
-    "Investigative":  [("STEM", 0.9), ("Sosial Humaniora", 0.5), ("Pendidikan", 0.3)],
-    "Artistic":       [("Seni Kreatif", 0.9), ("Sosial Humaniora", 0.5), ("Pendidikan", 0.3)],
-    "Social":         [("Pendidikan", 0.9), ("Sosial Humaniora", 0.7), ("Bisnis Manajemen", 0.4)],
-    "Enterprising":   [("Bisnis Manajemen", 0.9), ("Sosial Humaniora", 0.5), ("STEM", 0.3)],
-    "Conventional":   [("Bisnis Manajemen", 0.9), ("STEM", 0.6), ("Pendidikan", 0.3)],
+    "Realistic":     [("STEM", 0.9), ("Bisnis Manajemen", 0.4), ("Sosial Humaniora", 0.2)],
+    "Investigative": [("STEM", 0.9), ("Sosial Humaniora", 0.5), ("Pendidikan", 0.3)],
+    "Artistic":      [("Seni Kreatif", 0.9), ("Sosial Humaniora", 0.5), ("Pendidikan", 0.3)],
+    "Social":        [("Pendidikan", 0.9), ("Sosial Humaniora", 0.7), ("Bisnis Manajemen", 0.4)],
+    "Enterprising":  [("Bisnis Manajemen", 0.9), ("Sosial Humaniora", 0.5), ("STEM", 0.3)],
+    "Conventional":  [("Bisnis Manajemen", 0.9), ("STEM", 0.6), ("Pendidikan", 0.3)],
 }
 
 
 class MajorRecommender:
     """
-    Merekomendasikan TOP-3 Program Studi berdasarkan kombinasi:
+    Merekomendasikan Program Studi berdasarkan kombinasi:
       - RIASEC dominant
       - Rumpun Ilmu dari nilai akademik
-      - Profil kecerdasan Gardner (opsional)
+      - Probabilitas RIASEC (opsional)
       - Rata-rata nilai akademik (tiebreaker)
+      - Status sejalan/berbeda
     """
 
     def __init__(self):
-        # Mapping: rumpun → list program studi + metadata
         self._prodi_data: Dict[str, List[Dict]] = {}
-        # Mapping: program studi → rumpun
         self._prodi_to_rumpun: Dict[str, str] = {}
-        # Rata-rata tingkat kesesuaian per program studi (dari dataset)
         self._prodi_avg_score: Dict[str, float] = {}
 
     @property
@@ -111,7 +105,6 @@ class MajorRecommender:
             df: DataFrame hasil DatasetLoader.load_akademik()
                 Kolom: rumpun_ilmu, program_studi, tingkat_kesesuaian
         """
-        # Rata-rata tingkat kesesuaian per program studi
         avg_score = (
             df.groupby("program_studi")["tingkat_kesesuaian"]
             .mean()
@@ -120,7 +113,6 @@ class MajorRecommender:
         )
         self._prodi_avg_score = avg_score
 
-        # Group program studi per rumpun
         grouped = df.groupby("rumpun_ilmu")["program_studi"].unique()
 
         self._prodi_data = {}
@@ -151,8 +143,10 @@ class MajorRecommender:
                     })
                     self._prodi_to_rumpun[prodi] = rumpun
 
-        logger.info(f"MajorRecommender: {self.n_programs} program studi dari "
-                    f"{len(self._prodi_data)} rumpun")
+        logger.info(
+            f"MajorRecommender: {self.n_programs} program studi dari "
+            f"{len(self._prodi_data)} rumpun"
+        )
 
     def recommend(
         self,
@@ -161,6 +155,7 @@ class MajorRecommender:
         riasec_proba: Optional[Dict[str, float]] = None,
         avg_nilai: float = 80.0,
         top_n: int = 3,
+        sejalan: bool = True,
     ) -> List[Dict]:
         """
         Rekomendasikan TOP-N Program Studi.
@@ -170,38 +165,33 @@ class MajorRecommender:
             rumpun_ilmu    : prediksi Rumpun Ilmu dari nilai akademik
             riasec_proba   : dict probabilitas RIASEC (opsional)
             avg_nilai      : rata-rata nilai akademik (70-100)
-            top_n          : jumlah rekomendasi
+            top_n          : jumlah rekomendasi (3 jika sejalan, 5 jika berbeda)
+            sejalan        : True jika RIASEC cocok dengan Rumpun Ilmu
 
         Returns:
             List of dict dengan key:
-              program_studi, rumpun_ilmu, alasan, skor_kesesuaian,
-              prediksi_nilai (estimasi IPK awal)
+              program_studi, rumpun_ilmu, alasan, skor_kesesuaian, prediksi_ipk
         """
         if not self._prodi_data:
             return self._fallback_recommend(riasec_dominant, top_n)
 
-        # Kumpulkan semua program studi dengan skor
-        scored: List[Tuple[str, str, float]] = []  # (prodi, rumpun, skor)
+        scored: List[Tuple[str, str, float]] = []
 
         for rumpun, prodis in self._prodi_data.items():
-            # Bobot affinitas RIASEC → Rumpun
             riasec_affinity = self._riasec_rumpun_score(riasec_dominant, rumpun)
-            # Bonus jika rumpun cocok dengan prediksi akademik
             rumpun_match_bonus = 0.3 if rumpun == rumpun_ilmu else 0.0
 
             for prodi_meta in prodis:
                 prodi = prodi_meta["program_studi"]
-                base_score = prodi_meta.get("avg_kesesuaian", 3.0) / 5.0  # norm ke 0-1
+                base_score = prodi_meta.get("avg_kesesuaian", 3.0) / 5.0
 
-                # Skor akhir
                 final_score = (
-                    0.40 * riasec_affinity      +   # kecocokan RIASEC
-                    0.30 * rumpun_match_bonus   +   # kecocokan nilai akademik
-                    0.20 * base_score           +   # tingkat kesesuaian dataset
-                    0.10 * (avg_nilai / 100.0)      # pengaruh nilai rata-rata
+                    0.40 * riasec_affinity    +
+                    0.30 * rumpun_match_bonus +
+                    0.20 * base_score         +
+                    0.10 * (avg_nilai / 100.0)
                 )
 
-                # Bonus tambahan dari probabilitas RIASEC jika ada
                 if riasec_proba:
                     for r_type, r_score in riasec_proba.items():
                         affinity = self._riasec_rumpun_score(r_type, rumpun)
@@ -209,24 +199,28 @@ class MajorRecommender:
 
                 scored.append((prodi, rumpun, final_score))
 
-        # Sort dan ambil top_n tanpa duplikat per rumpun
         scored.sort(key=lambda x: -x[2])
 
+        # Jika berbeda: longgarkan batas per rumpun agar lebih beragam
+        max_per_rumpun = 2 if sejalan else 3
+
         results = []
-        seen_rumpun = {}
+        seen_rumpun: Dict[str, int] = {}
         for prodi, rumpun, skor in scored:
             if len(results) >= top_n:
                 break
             seen_count = seen_rumpun.get(rumpun, 0)
-            if seen_count >= 2:
+            if seen_count >= max_per_rumpun:
                 continue
             seen_rumpun[rumpun] = seen_count + 1
             results.append({
-                "program_studi":  prodi,
-                "rumpun_ilmu":    rumpun,
-                "alasan":         self._generate_reason(prodi, rumpun, riasec_dominant, avg_nilai),
-                "skor_kesesuaian": round(min(skor * 5, 5.0), 2),  # kembalikan ke skala 1-5
-                "prediksi_ipk":   self._estimate_ipk(avg_nilai, skor),
+                "program_studi":   prodi,
+                "rumpun_ilmu":     rumpun,
+                "alasan":          self._generate_reason(
+                    prodi, rumpun, riasec_dominant, avg_nilai, sejalan
+                ),
+                "skor_kesesuaian": round(min(skor * 5, 5.0), 2),
+                "prediksi_ipk":    self._estimate_ipk(avg_nilai, skor),
             })
 
         return results[:top_n]
@@ -243,16 +237,29 @@ class MajorRecommender:
         return 0.1
 
     def _generate_reason(
-        self, prodi: str, rumpun: str, riasec: str, avg_nilai: float
+        self,
+        prodi: str,
+        rumpun: str,
+        riasec: str,
+        avg_nilai: float,
+        sejalan: bool = True,
     ) -> str:
         desc = RIASEC_DESCRIPTIONS.get(riasec, {})
         karakter = desc.get("karakter", riasec)
         nilai_ket = "sangat baik" if avg_nilai >= 90 else "baik" if avg_nilai >= 80 else "cukup"
-        return (
-            f"Profil {karakter} sangat sesuai dengan bidang {rumpun}. "
-            f"Dengan nilai akademik {nilai_ket} ({avg_nilai:.0f}), "
-            f"{prodi} menjadi pilihan yang kuat untuk pengembangan kariermu."
-        )
+        if sejalan:
+            return (
+                f"Profil {karakter} dari tulisan tanganmu sejalan dengan bidang {rumpun}. "
+                f"Dengan nilai akademik {nilai_ket} ({avg_nilai:.0f}), "
+                f"{prodi} menjadi pilihan yang kuat dan konsisten untuk kariermu."
+            )
+        else:
+            return (
+                f"{prodi} di bidang {rumpun} dapat menjembatani karakter {karakter} "
+                f"dengan kemampuan akademikmu. "
+                f"Dengan nilai {nilai_ket} ({avg_nilai:.0f}), pilihan ini membuka "
+                f"perspektif karier yang lebih luas."
+            )
 
     def _estimate_ipk(self, avg_nilai: float, skor: float) -> str:
         """Estimasi IPK awal berdasarkan nilai rata-rata dan skor kesesuaian."""
@@ -265,21 +272,21 @@ class MajorRecommender:
     def _fallback_recommend(self, riasec: str, top_n: int) -> List[Dict]:
         """Fallback jika model belum dibangun dari dataset."""
         fallback_map = {
-            "Realistic":      ["S1 Teknik Informatika", "S1 Teknik Sipil", "S1 Ilmu Keolahragaan"],
-            "Investigative":  ["S1 Matematika", "S1 Kimia", "S1 Psikologi"],
-            "Artistic":       ["S1 Desain Komunikasi Visual", "S1 Seni Rupa Murni", "S1 Ilmu Komunikasi"],
-            "Social":         ["S1 Pendidikan Guru Sekolah Dasar", "S1 Psikologi", "S1 Bimbingan dan Konseling"],
-            "Enterprising":   ["S1 Manajemen", "S1 Administrasi Bisnis", "S1 Hubungan Internasional"],
-            "Conventional":   ["S1 Akuntansi", "S1 Statistika", "S1 Sistem Informasi"],
+            "Realistic":     ["S1 Teknik Informatika", "S1 Teknik Sipil", "S1 Ilmu Keolahragaan"],
+            "Investigative": ["S1 Matematika", "S1 Kimia", "S1 Psikologi"],
+            "Artistic":      ["S1 Desain Komunikasi Visual", "S1 Seni Rupa Murni", "S1 Ilmu Komunikasi"],
+            "Social":        ["S1 Pendidikan Guru Sekolah Dasar", "S1 Psikologi", "S1 Bimbingan dan Konseling"],
+            "Enterprising":  ["S1 Manajemen", "S1 Administrasi Bisnis", "S1 Hubungan Internasional"],
+            "Conventional":  ["S1 Akuntansi", "S1 Statistika", "S1 Sistem Informasi"],
         }
         prodis = fallback_map.get(riasec, ["S1 Manajemen", "S1 Psikologi", "S1 Ilmu Komunikasi"])
         return [
             {
-                "program_studi": p,
-                "rumpun_ilmu":   self._prodi_to_rumpun.get(p, "Umum"),
-                "alasan":        f"Rekomendasi berdasarkan profil RIASEC {riasec}.",
+                "program_studi":   p,
+                "rumpun_ilmu":     self._prodi_to_rumpun.get(p, "Umum"),
+                "alasan":          f"Rekomendasi berdasarkan profil RIASEC {riasec}.",
                 "skor_kesesuaian": 3.5,
-                "prediksi_ipk":  "3.0 – 3.5",
+                "prediksi_ipk":    "3.0 – 3.5",
             }
             for p in prodis[:top_n]
         ]
@@ -291,9 +298,9 @@ class MajorRecommender:
         if os.path.dirname(path):
             os.makedirs(os.path.dirname(path), exist_ok=True)
         joblib.dump({
-            "prodi_data":       self._prodi_data,
-            "prodi_to_rumpun":  self._prodi_to_rumpun,
-            "prodi_avg_score":  self._prodi_avg_score,
+            "prodi_data":      self._prodi_data,
+            "prodi_to_rumpun": self._prodi_to_rumpun,
+            "prodi_avg_score": self._prodi_avg_score,
         }, path, compress=3)
         logger.info(f"MajorRecommender disimpan: {path}")
 

@@ -1,14 +1,15 @@
 """
 =============================================================
-MODUL: riasec_classifier.py  (Dataset Real v2)
+MODUL: riasec_classifier.py  (Dataset Real v3 — RIASEC Direct)
 =============================================================
 Dua classifier utama:
 
-  1. BigFiveClassifier
+  1. RiasecClassifier  (BARU)
      Input : 10 fitur gambar tulisan tangan
-     Output: label Big Five (Openness / Conscientiousness /
-             Extraversion / Agreeableness / Neuroticism)
-     Dataset: 221 gambar berlabel dari folder Big Five
+     Output: label RIASEC langsung
+             (Realistic / Investigative / Artistic /
+              Social / Enterprising / Conventional)
+     Dataset: 235 baris CSV dengan label riasec_primary
 
   2. RumpunClassifier
      Input : 14 nilai akademik (2 semester)
@@ -44,20 +45,20 @@ def _balanced_weights(y: pd.Series) -> Dict[str, float]:
 
 
 # ------------------------------------------------------------------
-# 1. BigFiveClassifier — Gambar → Big Five Personality
+# 1. RiasecClassifier — Fitur Tulisan → RIASEC Langsung
 # ------------------------------------------------------------------
 
-class BigFiveClassifier:
+class RiasecClassifier:
     """
-    Memprediksi Big Five personality dari 10 fitur tulisan tangan.
+    Memprediksi tipe RIASEC dari 10 fitur tulisan tangan.
 
     Input : dict / DataFrame dengan kolom:
             letter_size, slant, pressure, spacing, readability,
             neatness, connectivity, ornament, baseline, density
 
-    Output: label Big Five string
-            {'Openness', 'Conscientiousness', 'Extraversion',
-             'Agreeableness', 'Neuroticism'}
+    Output: label RIASEC string
+            {'Realistic', 'Investigative', 'Artistic',
+             'Social', 'Enterprising', 'Conventional'}
     """
 
     FEATURES = [
@@ -72,7 +73,7 @@ class BigFiveClassifier:
 
     def train(self, X: pd.DataFrame, y: pd.Series) -> dict:
         self.classes_ = sorted(y.unique().tolist())
-        logger.info(f"BigFive training: {len(X)} sampel, {len(self.classes_)} kelas")
+        logger.info(f"RIASEC training: {len(X)} sampel, {len(self.classes_)} kelas")
         logger.info(f"  Distribusi: {y.value_counts().to_dict()}")
 
         X_feat = self._ensure_features(X)
@@ -140,16 +141,16 @@ class BigFiveClassifier:
             "classes_":            self.classes_,
             "feature_importances": self._feature_importances,
         }, path, compress=3)
-        logger.info(f"BigFive model disimpan: {path}")
+        logger.info(f"RIASEC model disimpan: {path}")
 
     @classmethod
-    def load(cls, path: str) -> "BigFiveClassifier":
+    def load(cls, path: str) -> "RiasecClassifier":
         obj = cls()
         data = joblib.load(path)
         obj.pipeline = data["pipeline"]
         obj.classes_ = data["classes_"]
         obj._feature_importances = data.get("feature_importances", {})
-        logger.info(f"BigFive model dimuat: {path}")
+        logger.info(f"RIASEC model dimuat: {path}")
         return obj
 
     def _ensure_features(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -172,6 +173,7 @@ class RumpunClassifier:
     Memprediksi Rumpun Ilmu dari nilai akademik 2 semester.
 
     Input : dict dengan 14 key (mat_s4, fis_s4, ..., info_s5)
+            Nilai 0 = siswa tidak ambil pelajaran → TETAP 0
     Output: 'STEM' | 'Sosial Humaniora' | 'Bisnis Manajemen' |
             'Pendidikan' | 'Seni Kreatif'
     """
@@ -182,13 +184,13 @@ class RumpunClassifier:
     ]
 
     FEATURE_LABELS = {
-        "mat_s4": "Matematika Smt 4",  "fis_s4": "Fisika Smt 4",
-        "kim_s4": "Kimia Smt 4",       "bio_s4": "Biologi Smt 4",
-        "bind_s4": "B. Indonesia Smt 4","bing_s4": "B. Inggris Smt 4",
-        "info_s4": "Informatika Smt 4", "mat_s5": "Matematika Smt 5",
-        "fis_s5": "Fisika Smt 5",       "kim_s5": "Kimia Smt 5",
-        "bio_s5": "Biologi Smt 5",      "bind_s5": "B. Indonesia Smt 5",
-        "bing_s5": "B. Inggris Smt 5",  "info_s5": "Informatika Smt 5",
+        "mat_s4":  "Matematika Smt 4",   "fis_s4":  "Fisika Smt 4",
+        "kim_s4":  "Kimia Smt 4",        "bio_s4":  "Biologi Smt 4",
+        "bind_s4": "B. Indonesia Smt 4", "bing_s4": "B. Inggris Smt 4",
+        "info_s4": "Informatika Smt 4",  "mat_s5":  "Matematika Smt 5",
+        "fis_s5":  "Fisika Smt 5",       "kim_s5":  "Kimia Smt 5",
+        "bio_s5":  "Biologi Smt 5",      "bind_s5": "B. Indonesia Smt 5",
+        "bing_s5": "B. Inggris Smt 5",   "info_s5": "Informatika Smt 5",
     }
 
     # Mata pelajaran kunci per rumpun (heuristik fallback)
@@ -260,13 +262,15 @@ class RumpunClassifier:
 
     def heuristic_predict(self, scores: Dict[str, float]) -> str:
         rumpun_scores = {
-            r: float(np.mean([scores.get(s, 75) for s in subjs]))
+            r: float(np.mean([scores.get(s, 0) for s in subjs]))
             for r, subjs in self.RUMPUN_KEY_SUBJECTS.items()
         }
         return max(rumpun_scores, key=rumpun_scores.get)
 
     def get_top_subjects(self, academic_scores: Dict[str, float], top_n: int = 3) -> List[Dict]:
-        sorted_subj = sorted(academic_scores.items(), key=lambda x: -x[1])
+        # Hanya tampilkan mata pelajaran yang nilainya > 0
+        filtered = {k: v for k, v in academic_scores.items() if v > 0}
+        sorted_subj = sorted(filtered.items(), key=lambda x: -x[1])
         return [
             {"mata_pelajaran": self.FEATURE_LABELS.get(k, k), "nilai": round(v, 1)}
             for k, v in sorted_subj[:top_n]
@@ -296,8 +300,8 @@ class RumpunClassifier:
         for col in self.FEATURES:
             if col not in X.columns:
                 X = X.copy()
-                X[col] = 75.0
+                X[col] = 0.0
         return X[self.FEATURES]
 
     def _dict_to_df(self, scores: Dict[str, float]) -> pd.DataFrame:
-        return pd.DataFrame([{f: scores.get(f, 75.0) for f in self.FEATURES}])
+        return pd.DataFrame([{f: scores.get(f, 0.0) for f in self.FEATURES}])

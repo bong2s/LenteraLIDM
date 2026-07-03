@@ -1,10 +1,12 @@
 """
 =============================================================
-MODUL: image_processor.py  (Dataset Real v2)
+MODUL: image_processor.py  (Dataset Real v3 — RIASEC Direct)
 =============================================================
-Mengekstrak fitur numerik dari gambar tulisan tangan menggunakan
-OpenCV, lalu menghitung kecenderungan Big Five dan RIASEC dari
-fitur-fitur tersebut berdasarkan prinsip grafologi.
+Mengekstrak 10 fitur numerik dari gambar tulisan tangan
+menggunakan OpenCV.
+
+Pipeline BigFive telah dihapus sepenuhnya.
+extract_full() sekarang merupakan alias sederhana untuk extract().
 
 FITUR YANG DIEKSTRAK (10 fitur OpenCV):
   1. letter_size   — rata-rata ukuran huruf
@@ -17,11 +19,6 @@ FITUR YANG DIEKSTRAK (10 fitur OpenCV):
   8. ornament      — hiasan/dekorasi
   9. baseline      — kelurusan baris
   10. density      — kepadatan tinta
-
-OUTPUT TAMBAHAN (dihitung dari 10 fitur di atas):
-  - big_five_scores : {'Openness': 0.7, 'Conscientiousness': 0.6, ...}
-  - big_five_dominant: 'Openness'
-  - riasec_tendency : {'Realistic': 0.3, 'Investigative': 0.7, ...}
 =============================================================
 """
 
@@ -33,95 +30,27 @@ from typing import Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------------
-# Grafologi: Mapping fitur tulisan → Big Five
-# ------------------------------------------------------------------
-# Setiap Big Five dihitung sebagai kombinasi berbobot dari fitur gambar
-# Bobot berdasarkan literatur grafologi:
-#   Openness        : ornamen, kemiringan, konektivitas tinggi
-#   Conscientiousness: kerapian, baseline lurus, sedikit ornamen
-#   Extraversion    : huruf besar, tekanan kuat, miring kanan
-#   Agreeableness   : konektivitas tinggi, jarak longgar, tekanan ringan
-#   Neuroticism     : ketidak-konsistenan baseline, tekanan tidak merata
-
-GRAFOLOGI_BIGFIVE_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "Openness": {
-        "ornament": +0.35, "slant": +0.25, "connectivity": +0.20,
-        "spacing": +0.10, "density": +0.10,
-    },
-    "Conscientiousness": {
-        "neatness": +0.35, "baseline": +0.30, "readability": +0.20,
-        "ornament": -0.10, "pressure": +0.05,
-    },
-    "Extraversion": {
-        "letter_size": +0.35, "pressure": +0.30, "slant": +0.20,
-        "spacing": +0.10, "density": +0.05,
-    },
-    "Agreeableness": {
-        "connectivity": +0.35, "spacing": +0.25, "pressure": -0.20,
-        "neatness": +0.10, "readability": +0.10,
-    },
-    "Neuroticism": {
-        "neatness": -0.40, "baseline": -0.30, "readability": -0.20,
-        "ornament": +0.05, "density": +0.05,
-    },
-}
-
-# Big Five → RIASEC dominant mapping (psikologi karier)
-BIGFIVE_TO_RIASEC_DOMINANT: Dict[str, str] = {
-    "Openness":          "Artistic",
-    "Conscientiousness": "Conventional",
-    "Extraversion":      "Enterprising",
-    "Agreeableness":     "Social",
-    "Neuroticism":       "Artistic",
-}
-
-# Big Five → bobot RIASEC (untuk skor probabilitas)
-BIGFIVE_TO_RIASEC_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "Openness": {
-        "Realistic": 0.10, "Investigative": 0.25,
-        "Artistic": 0.35,  "Social": 0.15,
-        "Enterprising": 0.10, "Conventional": 0.05,
-    },
-    "Conscientiousness": {
-        "Realistic": 0.20, "Investigative": 0.15,
-        "Artistic": 0.05,  "Social": 0.10,
-        "Enterprising": 0.15, "Conventional": 0.35,
-    },
-    "Extraversion": {
-        "Realistic": 0.10, "Investigative": 0.05,
-        "Artistic": 0.10,  "Social": 0.25,
-        "Enterprising": 0.40, "Conventional": 0.10,
-    },
-    "Agreeableness": {
-        "Realistic": 0.10, "Investigative": 0.10,
-        "Artistic": 0.15,  "Social": 0.40,
-        "Enterprising": 0.15, "Conventional": 0.10,
-    },
-    "Neuroticism": {
-        "Realistic": 0.05, "Investigative": 0.20,
-        "Artistic": 0.40,  "Social": 0.15,
-        "Enterprising": 0.05, "Conventional": 0.15,
-    },
-}
-
-
 class HandwritingFeatureExtractor:
     """
-    Ekstrak fitur tulisan tangan dari gambar menggunakan OpenCV.
+    Ekstrak 10 fitur tulisan tangan dari gambar menggunakan OpenCV.
+    Tidak ada lagi pipeline Big Five.
 
     Cara pakai:
         extractor = HandwritingFeatureExtractor()
         features  = extractor.extract("path/ke/gambar.jpg")
-        result    = extractor.extract_full("path/ke/gambar.jpg")
-        # result berisi: raw_features, big_five_scores, riasec_tendency
+        features  = extractor.extract_from_bytes(image_bytes)
     """
+
+    FEATURE_NAMES = [
+        "letter_size", "slant", "pressure", "spacing", "readability",
+        "neatness", "connectivity", "ornament", "baseline", "density",
+    ]
 
     def __init__(self, target_size: Tuple[int, int] = (512, 512)):
         self.target_size = target_size
 
     # ------------------------------------------------------------------
-    # API UTAMA: extract() — 10 fitur numerik
+    # API UTAMA
     # ------------------------------------------------------------------
     def extract(self, image_path: str) -> Dict[str, float]:
         """Baca gambar dari file dan ekstrak 10 fitur tulisan tangan."""
@@ -139,49 +68,14 @@ class HandwritingFeatureExtractor:
         img = cv2.resize(img, self.target_size)
         return self._compute_features(img)
 
-    # ------------------------------------------------------------------
-    # API LENGKAP: extract_full() — fitur + Big Five + RIASEC
-    # ------------------------------------------------------------------
-    def extract_full(self, image_path: str) -> Dict:
-        """
-        Ekstrak fitur gambar LENGKAP: fitur dasar + Big Five + RIASEC.
+    # Alias untuk kompatibilitas — kembalikan dict fitur saja (bukan dict+bigfive)
+    def extract_full(self, image_path: str) -> Dict[str, float]:
+        """Alias untuk extract() — dulu mengembalikan dict berisi bigfive, kini hanya fitur."""
+        return self.extract(image_path)
 
-        Returns:
-            {
-                'raw_features'  : {'letter_size': 4.2, ...},  # 10 fitur
-                'big_five_scores': {'Openness': 6.8, ...},    # 5 skor (0-10)
-                'big_five_dominant': 'Openness',
-                'riasec_tendency'  : {'Artistic': 0.35, ...}, # 6 skor (sum=1)
-            }
-        """
-        img = self._load(image_path)
-        if img is None:
-            return self._full_defaults()
-        return self._compute_full(img)
-
-    def extract_full_from_bytes(self, image_bytes: bytes) -> Dict:
-        """Versi extract_full() yang menerima bytes (untuk FastAPI)."""
-        arr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-        if img is None or img.size == 0:
-            return self._full_defaults()
-        img = cv2.resize(img, self.target_size)
-        return self._compute_full(img)
-
-    # ------------------------------------------------------------------
-    # INTERNAL: Hitung semua fitur + Big Five + RIASEC
-    # ------------------------------------------------------------------
-    def _compute_full(self, gray: np.ndarray) -> Dict:
-        raw = self._compute_features(gray)
-        big5 = self._compute_bigfive(raw)
-        dominant = max(big5, key=big5.get)
-        riasec = self._bigfive_to_riasec(big5)
-        return {
-            "raw_features":     raw,
-            "big_five_scores":  big5,
-            "big_five_dominant": dominant,
-            "riasec_tendency":  riasec,
-        }
+    def extract_full_from_bytes(self, image_bytes: bytes) -> Dict[str, float]:
+        """Alias untuk extract_from_bytes()."""
+        return self.extract_from_bytes(image_bytes)
 
     # ------------------------------------------------------------------
     # FITUR DASAR: 10 fitur OpenCV
@@ -201,46 +95,6 @@ class HandwritingFeatureExtractor:
             "density":      self._density(binary),
         }
         return {k: float(np.clip(v, 0.0, 10.0)) for k, v in raw.items()}
-
-    # ------------------------------------------------------------------
-    # BIG FIVE dari fitur tulisan (grafologi)
-    # ------------------------------------------------------------------
-    def _compute_bigfive(self, f: Dict[str, float]) -> Dict[str, float]:
-        """
-        Hitung 5 skor Big Five dari 10 fitur gambar.
-        Setiap skor dalam rentang 0-10.
-        """
-        scores: Dict[str, float] = {}
-        for trait, weights in GRAFOLOGI_BIGFIVE_WEIGHTS.items():
-            raw = 5.0  # titik tengah (nilai netral)
-            for feature, w in weights.items():
-                val = f.get(feature, 5.0)
-                raw += w * (val - 5.0)
-            scores[trait] = float(np.clip(raw, 1.0, 10.0))
-        return {k: round(v, 2) for k, v in scores.items()}
-
-    # ------------------------------------------------------------------
-    # RIASEC dari Big Five scores
-    # ------------------------------------------------------------------
-    def _bigfive_to_riasec(self, big5: Dict[str, float]) -> Dict[str, float]:
-        """
-        Konversi skor Big Five ke distribusi probabilitas RIASEC.
-        Output: dict dengan total mendekati 1.0
-        """
-        riasec_raw = {t: 0.0 for t in
-                      ["Realistic","Investigative","Artistic","Social","Enterprising","Conventional"]}
-
-        total_big5 = sum(big5.values()) or 1.0
-        for trait, score in big5.items():
-            weight_normalized = score / total_big5
-            if trait not in BIGFIVE_TO_RIASEC_WEIGHTS:
-                continue
-            for riasec_type, w in BIGFIVE_TO_RIASEC_WEIGHTS[trait].items():
-                riasec_raw[riasec_type] += weight_normalized * w
-
-        total = sum(riasec_raw.values()) or 1.0
-        return {k: round(v / total, 4) for k, v in sorted(riasec_raw.items(),
-                                                            key=lambda x: -x[1])}
 
     # ------------------------------------------------------------------
     # 10 Fitur OpenCV (implementasi)
@@ -286,14 +140,17 @@ class HandwritingFeatureExtractor:
     def _spacing(self, binary: np.ndarray) -> float:
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes = sorted(
-            [cv2.boundingRect(c) for c in contours if cv2.boundingRect(c)[2] > 5 and cv2.boundingRect(c)[3] > 5],
-            key=lambda b: b[0]
+            [cv2.boundingRect(c) for c in contours
+             if cv2.boundingRect(c)[2] > 5 and cv2.boundingRect(c)[3] > 5],
+            key=lambda b: b[0],
         )
         if len(boxes) < 2:
             return 5.0
-        gaps = [boxes[i+1][0] - (boxes[i][0] + boxes[i][2])
-                for i in range(len(boxes)-1)
-                if 0 < boxes[i+1][0] - (boxes[i][0] + boxes[i][2]) < 200]
+        gaps = [
+            boxes[i + 1][0] - (boxes[i][0] + boxes[i][2])
+            for i in range(len(boxes) - 1)
+            if 0 < boxes[i + 1][0] - (boxes[i][0] + boxes[i][2]) < 200
+        ]
         return float(np.clip(np.mean(gaps) / 100 * 10, 0, 10)) if gaps else 5.0
 
     def _readability(self, binary: np.ndarray) -> float:
@@ -308,9 +165,12 @@ class HandwritingFeatureExtractor:
 
     def _neatness(self, binary: np.ndarray) -> float:
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        baselines = [y + h for c in contours
-                     for (_, y, _, h) in [cv2.boundingRect(c)]
-                     if cv2.contourArea(c) > 50]
+        baselines = [
+            y + h
+            for c in contours
+            for (_, y, _, h) in [cv2.boundingRect(c)]
+            if cv2.contourArea(c) > 50
+        ]
         if len(baselines) < 3:
             return 5.0
         return float(np.clip(max(0, 10 - np.std(baselines) / 200 * 10), 0, 10))
@@ -319,7 +179,7 @@ class HandwritingFeatureExtractor:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
         closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
         n_before, _ = cv2.connectedComponents(binary)
-        n_after,  _ = cv2.connectedComponents(closed)
+        n_after, _  = cv2.connectedComponents(closed)
         if n_before == 0:
             return 5.0
         return float(np.clip((1 - n_after / max(n_before, 1)) * 10, 0, 10))
@@ -354,21 +214,14 @@ class HandwritingFeatureExtractor:
     # ------------------------------------------------------------------
     def _defaults(self) -> Dict[str, float]:
         return {
-            "letter_size": 5.0, "slant": 5.0, "pressure": 5.0,
-            "spacing": 5.0, "readability": 5.0, "neatness": 5.0,
-            "connectivity": 5.0, "ornament": 3.0, "baseline": 7.0,
-            "density": 5.0,
-        }
-
-    def _full_defaults(self) -> Dict:
-        raw = self._defaults()
-        return {
-            "raw_features":      raw,
-            "big_five_scores":   {t: 5.0 for t in
-                                  ["Openness","Conscientiousness","Extraversion",
-                                   "Agreeableness","Neuroticism"]},
-            "big_five_dominant": "Conscientiousness",
-            "riasec_tendency":   {t: round(1/6, 4) for t in
-                                  ["Realistic","Investigative","Artistic",
-                                   "Social","Enterprising","Conventional"]},
+            "letter_size": 5.0,
+            "slant":       5.0,
+            "pressure":    5.0,
+            "spacing":     5.0,
+            "readability": 5.0,
+            "neatness":    5.0,
+            "connectivity": 5.0,
+            "ornament":    3.0,
+            "baseline":    7.0,
+            "density":     5.0,
         }

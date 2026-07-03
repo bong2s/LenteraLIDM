@@ -19,9 +19,9 @@ def health_check() -> Dict:
         {"status": "ok", "message": "ML API berjalan normal"}
     """
     return {
-        "status": "ok",
+        "status":  "ok",
         "message": "Handwriting Analysis ML API berjalan normal",
-        "version": "1.0.0",
+        "version": "3.0.0",
     }
 
 
@@ -33,7 +33,7 @@ def root() -> Dict:
     """
     return {
         "message": "Handwriting Analysis ML API",
-        "docs": "/docs",
-        "health": "/health",
+        "docs":    "/docs",
+        "health":  "/health",
         "predict": "/predict (POST)",
     }

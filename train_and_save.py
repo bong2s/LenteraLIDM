@@ -1,6 +1,6 @@
 """
 =============================================================
-FILE: train_and_save.py  (Dataset Real v2)
+FILE: train_and_save.py  (Dataset Real v3 — RIASEC Direct)
 =============================================================
 Script satu-klik untuk training semua model ML.
 
@@ -14,16 +14,10 @@ Script ini otomatis mencari dataset di:
 
 DATASET YANG DIBUTUHKAN (di salah satu folder di atas):
   Dataset_AkademikN.xlsx
-  Dataset_TalentN.xlsx
-  Dataset_TulisanN/
-    Openness/
-    Conscientiousness/
-    Extraversion/
-    Agreeableness/
-    Neuroticism/
+  Dataset_TulisanN.csv
 
 OUTPUT (disimpan ke models/):
-  bigfive_model.pkl
+  riasec_model.pkl
   rumpun_model.pkl
   major_model.pkl
   feature_meta.json
@@ -35,9 +29,6 @@ import sys
 import json
 
 # ── Tambahkan ROOT ke sys.path ──────────────────────────────
-# Bekerja baik dijalankan dari:
-#   C:\...\Lentera LIDM\             → ROOT = folder ini
-#   C:\...\Lentera LIDM\ml-handwriting\ → ROOT = folder ini
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
@@ -53,20 +44,19 @@ def find_data_dir(root: str) -> str:
     candidates = [
         os.path.join(root, "data_new"),
         os.path.join(root, "data"),
-        root,  # kalau file xlsx langsung di root
+        root,
     ]
 
     required_files = [
         "Dataset_AkademikN.xlsx",
-        "Dataset_TalentN.xlsx",
-        "Dataset_TulisanN",
+        "Dataset_TulisanN.csv",
     ]
 
     for folder in candidates:
         if all(os.path.exists(os.path.join(folder, f)) for f in required_files):
             return folder
 
-    return ""  # tidak ditemukan
+    return ""
 
 
 def main():
@@ -82,17 +72,15 @@ def main():
     # ── Validasi ─────────────────────────────────────────────
     required = {
         "Dataset_AkademikN.xlsx": os.path.join(data_dir, "Dataset_AkademikN.xlsx"),
-        "Dataset_TalentN.xlsx":   os.path.join(data_dir, "Dataset_TalentN.xlsx"),
-        "Dataset_TulisanN/":      os.path.join(data_dir, "Dataset_TulisanN"),
+        "Dataset_TulisanN.csv":   os.path.join(data_dir, "Dataset_TulisanN.csv"),
     }
 
     if not data_dir:
         print("❌ Folder dataset tidak ditemukan!")
         print()
         print("Pastikan folder berikut ADA dan BERISI file dataset:")
-        print("   data/Dataset_AkademikN.xlsx")
-        print("   data/Dataset_TalentN.xlsx")
-        print("   data/Dataset_TulisanN/   (folder berisi subfolder Big Five)")
+        print("   data_new/Dataset_AkademikN.xlsx")
+        print("   data_new/Dataset_TulisanN.csv")
         print()
         print("Atau jalankan dengan argumen:")
         print("   python train_and_save.py C:\\path\\ke\\folder\\data")
@@ -107,36 +95,31 @@ def main():
         print()
         print("Pastikan nama file dataset PERSIS sama (termasuk huruf besar/kecil):")
         print("   Dataset_AkademikN.xlsx")
-        print("   Dataset_TalentN.xlsx")
-        print("   Dataset_TulisanN/  (folder)")
+        print("   Dataset_TulisanN.csv")
         sys.exit(1)
 
     # ── Tampilkan info sebelum training ──────────────────────
     print("=" * 60)
-    print("  ML TULISAN TANGAN — TRAINING DATASET REAL v2")
+    print("  ML TULISAN TANGAN — TRAINING DATASET REAL v3")
     print("=" * 60)
     print(f"  📁 Dataset  : {data_dir}")
     print(f"  💾 Output   : {model_dir}")
     print()
 
-    # Tampilkan folder yang ADA di dalam Dataset_TulisanN
-    tulisan_dir = os.path.join(data_dir, "Dataset_TulisanN")
-    total_gambar = 0
-    if os.path.isdir(tulisan_dir):
-        subfolders = [d for d in os.listdir(tulisan_dir)
-                      if os.path.isdir(os.path.join(tulisan_dir, d))]
-        if subfolders:
-            for folder in sorted(subfolders):
-                folder_path = os.path.join(tulisan_dir, folder)
-                n = len([f for f in os.listdir(folder_path)
-                         if f.lower().endswith((".jpg", ".jpeg", ".png"))])
-                total_gambar += n
-                print(f"  🖼️  {folder}: {n} gambar")
-            print(f"  Total: {total_gambar} gambar")
-        else:
-            print("  ⚠️  Dataset_TulisanN ada tapi KOSONG — tidak ada subfolder!")
-            print("  Pastikan kamu sudah extract ZIP dan ada subfolder di dalamnya.")
-            sys.exit(1)
+    # Tampilkan ringkasan CSV tulisan
+    csv_path = os.path.join(data_dir, "Dataset_TulisanN.csv")
+    try:
+        import pandas as pd
+        df_csv = pd.read_csv(csv_path)
+        print(f"  📄 Dataset_TulisanN.csv : {len(df_csv)} baris")
+        if "riasec_primary" in df_csv.columns:
+            dist = df_csv["riasec_primary"].value_counts().to_dict()
+            print(f"     Distribusi RIASEC   : {dist}")
+        if "dataset_split" in df_csv.columns:
+            split_dist = df_csv["dataset_split"].value_counts().to_dict()
+            print(f"     Split               : {split_dist}")
+    except Exception as e:
+        print(f"  ⚠️  Tidak bisa preview CSV: {e}")
     print()
 
     # ── Jalankan training ────────────────────────────────────
@@ -149,12 +132,12 @@ def main():
     # ── Ringkasan hasil ──────────────────────────────────────
     print()
     if report.get("status") == "SUCCESS":
-        bf  = report["bigfive_model"]
-        rum = report["rumpun_model"]
+        riasec = report["riasec_model"]
+        rum    = report["rumpun_model"]
         print("✅ TRAINING BERHASIL!")
-        print(f"   BigFive Accuracy : {bf['cv_accuracy_mean']:.1%}")
-        print(f"   Rumpun  Accuracy : {rum['cv_accuracy_mean']:.1%}")
-        print(f"   Program Studi    : {report['major_programs']} jurusan")
+        print(f"   RIASEC Accuracy : {riasec['cv_accuracy_mean']:.1%}")
+        print(f"   Rumpun Accuracy : {rum['cv_accuracy_mean']:.1%}")
+        print(f"   Program Studi   : {report['major_programs']} jurusan")
         print()
         print("Langkah selanjutnya — jalankan server:")
         print("   uvicorn api.main:app --reload --port 8000")

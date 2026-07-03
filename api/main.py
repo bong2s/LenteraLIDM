@@ -1,12 +1,12 @@
 """
 =============================================================
-FILE: api/main.py  (Dataset Real v2)
+FILE: api/main.py  (Dataset Real v3 RIASEC Direct)
 =============================================================
 Entry point FastAPI server analisis tulisan tangan.
 Jalankan: uvicorn api.main:app --reload --port 8000
 
 Endpoint:
-  POST /predict       — prediksi dari gambar + data siswa
+  POST /predict       — prediksi dari gambar + nilai akademik
   GET  /predict/demo  — contoh respons tanpa upload
   GET  /health        — cek status server
   GET  /docs          — Swagger UI interaktif
@@ -42,7 +42,7 @@ MODEL_DIR = os.environ.get("MODEL_DIR", str(ROOT / "models"))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("=" * 55)
-    logger.info("  Handwriting Analysis ML API — Dataset Real v2")
+    logger.info("  Handwriting Analysis ML API — Dataset Real v3")
     logger.info("=" * 55)
     logger.info(f"Model dir: {MODEL_DIR}")
 
@@ -70,17 +70,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Handwriting Analysis ML API",
     description="""
-## API Analisis Tulisan Tangan → Karakter Siswa + Rekomendasi Jurusan
+## API Analisis Tulisan Tangan → Karakter RIASEC + Rekomendasi Jurusan
 
-Dataset real: 221 gambar Big Five + 140 data akademik + 3600 data kecerdasan Gardner.
+Dataset real: 235 data tulisan (CSV) + 140 data akademik.
 
 ### Output:
-1. **Profil Big Five** — kepribadian OCEAN dari tulisan tangan
-2. **Tipe RIASEC** — karakter karier Holland (6 tipe)
-3. **Rumpun Ilmu** — kluster akademik yang paling cocok
-4. **TOP-3 Program Studi** — rekomendasi jurusan + alasan + estimasi IPK
+1. **Karakter RIASEC** — tipe kepribadian Holland langsung dari tulisan tangan
+2. **Kemampuan Akademik** — Rumpun Ilmu yang diprediksi dari nilai akademik
+3. **Perbandingan** — apakah RIASEC sejalan atau berbeda dengan kemampuan akademik
+4. **Rekomendasi Jurusan** — 3 jurusan (sejalan) atau 5 jurusan (berbeda)
     """,
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
