@@ -1,25 +1,30 @@
 """
 =============================================================
-MODUL: predictor.py  (Dataset Real v3 — RIASEC Direct)
+MODUL: predictor.py  (Dataset Real v3.1 — RIASEC + Minat)
 =============================================================
 Kelas utama yang dipanggil FastAPI untuk prediksi lengkap.
 
 ALUR PREDIKSI:
   1. Siapkan nilai akademik (default semua 0.0)
-  2. Ekstrak 10 fitur gambar via OpenCV
-  3. Prediksi RIASEC langsung dari fitur gambar
-  4. Prediksi Rumpun Ilmu dari nilai akademik
-  5. Cek apakah RIASEC sejalan dengan Rumpun Ilmu
-  6. Hitung rata-rata nilai (hanya pelajaran yang diambil, nilai > 0)
-  7. Rekomendasikan 3 jurusan (sejalan) atau 5 jurusan (berbeda)
+  2. Hitung RIASEC minat dari kuesioner (jika dikirim)
+  3. Ekstrak 10 fitur gambar via OpenCV
+  4. Prediksi RIASEC langsung dari fitur gambar
+  5. Prediksi Rumpun Ilmu dari nilai akademik
+  6. Perbandingan RIASEC tulisan vs Rumpun Ilmu → sejalan/berbeda
+  7. Perbandingan RIASEC tulisan vs RIASEC minat (jika ada)
+  8. Hitung rata-rata nilai (hanya pelajaran yang diambil, nilai > 0)
+  9. Tentukan top_n: 3 jika semua konsisten, 5 jika ada perbedaan
+ 10. Rekomendasikan jurusan
 
 OUTPUT API:
-  - riasec_karakter   : tipe RIASEC + deskripsi + kekuatan
-  - analisis_akademik : Rumpun Ilmu + nilai rata-rata + pelajaran kuat
-  - perbandingan      : status SEJALAN/BERBEDA + penjelasan
-  - rekomendasi_jurusan: TOP-3 atau TOP-5 Program Studi
-  - fitur_tulisan     : 10 fitur numerik tulisan tangan
-  - kelengkapan_data  : field mana yang diisi / default
+  - riasec_karakter       : RIASEC dari tulisan + deskripsi + kekuatan
+  - riasec_minat          : RIASEC dari kuesioner (None jika tidak dikirim)
+  - analisis_akademik     : Rumpun Ilmu + nilai rata-rata + pelajaran kuat
+  - perbandingan_akademik : status SEJALAN/BERBEDA (tulisan vs akademik)
+  - perbandingan_minat    : status SEJALAN/BERBEDA (tulisan vs minat, jika ada)
+  - rekomendasi_jurusan   : TOP-3 atau TOP-5 Program Studi
+  - fitur_tulisan         : 10 fitur numerik tulisan tangan
+  - kelengkapan_data      : field mana yang diisi / default
 =============================================================
 """
 
@@ -43,10 +48,16 @@ from src.models.major_recommender import MajorRecommender
 
 logger = logging.getLogger(__name__)
 
+# Kode huruf → nama RIASEC
+_CODE_TO_NAME = {
+    "R": "Realistic", "I": "Investigative", "A": "Artistic",
+    "S": "Social",    "E": "Enterprising",  "C": "Conventional",
+}
+
 
 class Predictor:
     """
-    Orkestrator prediksi lengkap analisis tulisan tangan.
+    Orkestrator prediksi lengkap analisis tulisan tangan + kuesioner minat.
 
     Cara pakai:
         predictor = Predictor()
@@ -54,6 +65,7 @@ class Predictor:
         result = predictor.predict(
             image_bytes=<bytes>,
             academic_scores={...},   # opsional
+            minat_scores={...},      # opsional — jawaban 24 soal atau 6 skor
         )
     """
 
@@ -97,38 +109,47 @@ class Predictor:
     # ------------------------------------------------------------------
     def predict(
         self,
-        image_bytes: bytes,
+        image_bytes:    bytes,
         academic_scores: Optional[Dict[str, float]] = None,
+        minat_scores:    Optional[Dict[str, Any]]   = None,
     ) -> Dict[str, Any]:
         """
-        Prediksi lengkap dari gambar + nilai akademik.
+        Prediksi lengkap dari gambar + nilai akademik + kuesioner minat.
 
         Args:
-            image_bytes    : bytes gambar tulisan tangan (jpg/png)
-            academic_scores: nilai akademik 2 semester (opsional)
-                             Keys: mat_s4, fis_s4, kim_s4, bio_s4,
-                                   bind_s4, bing_s4, info_s4,
-                                   mat_s5, fis_s5, kim_s5, bio_s5,
-                                   bind_s5, bing_s5, info_s5
-                             Nilai 0 = tidak ambil pelajaran (TETAP 0)
+            image_bytes     : bytes gambar tulisan tangan (jpg/png)
+            academic_scores : nilai akademik 14 mapel (opsional)
+            minat_scores    : jawaban kuesioner RIASEC (opsional)
+                Format A — 24 jawaban: {"q_R1":3,"q_R2":2,...,"q_C4":3}
+                Format B — 6 skor:     {"score_R":11,"score_I":12,...}
 
         Returns:
             dict lengkap hasil analisis (lihat schemas.py)
         """
-        kelengkapan = {}
+        kelengkapan: Dict[str, str] = {}
 
-        # --- STEP 1: Siapkan nilai akademik (default 0.0) ---
+        # --- STEP 1: Siapkan nilai akademik ---
         ac, ac_defaults = self._prepare_academic(academic_scores)
-        kelengkapan["akademik"] = "lengkap" if not ac_defaults else f"default: {ac_defaults}"
+        kelengkapan["akademik"] = "lengkap" if not ac_defaults else "sebagian (sisanya default 0)"
 
-        # --- STEP 2: Ekstrak 10 fitur gambar ---
+        # --- STEP 2: Hitung RIASEC minat dari kuesioner (jika ada) ---
+        minat_result: Optional[Dict] = None
+        if minat_scores:
+            try:
+                minat_result = self._compute_minat(minat_scores)
+                kelengkapan["minat"] = "lengkap"
+            except Exception as e:
+                logger.warning(f"Gagal proses data minat: {e}")
+                kelengkapan["minat"] = "error"
+
+        # --- STEP 3: Ekstrak 10 fitur gambar ---
         try:
             raw_features = self.extractor.extract_from_bytes(image_bytes)
         except Exception as e:
             logger.error(f"Gagal proses gambar: {e}")
             raw_features = self.extractor._defaults()
 
-        # --- STEP 3: Prediksi RIASEC langsung (bukan BigFive dulu) ---
+        # --- STEP 4: Prediksi RIASEC dari tulisan tangan ---
         riasec_proba: Dict[str, float] = {}
         if self.riasec_clf is not None:
             try:
@@ -140,7 +161,7 @@ class Predictor:
         else:
             riasec_dominant = "Investigative"
 
-        # --- STEP 4: Prediksi Rumpun Ilmu dari nilai akademik ---
+        # --- STEP 5: Prediksi Rumpun Ilmu dari nilai akademik ---
         rumpun_proba: Dict[str, float] = {}
         if self.rumpun_clf is not None:
             try:
@@ -148,43 +169,57 @@ class Predictor:
                 rumpun_proba    = self.rumpun_clf.predict_proba(ac)
             except Exception as e:
                 logger.warning(f"Rumpun model error, pakai heuristik: {e}")
-                rumpun_clf_fallback = RumpunClassifier()
-                rumpun_dominant = rumpun_clf_fallback.heuristic_predict(ac)
+                rumpun_dominant = RumpunClassifier().heuristic_predict(ac)
         else:
-            rumpun_clf_fallback = RumpunClassifier()
-            rumpun_dominant = rumpun_clf_fallback.heuristic_predict(ac)
+            rumpun_dominant = RumpunClassifier().heuristic_predict(ac)
 
-        # --- STEP 5: Perbandingan RIASEC vs Rumpun Ilmu ---
-        sejalan    = self._check_sejalan(riasec_dominant, rumpun_dominant)
-        penjelasan = self._generate_comparison_text(sejalan, riasec_dominant, rumpun_dominant)
+        # --- STEP 6: Perbandingan tulisan vs akademik ---
+        sejalan_akademik = self._check_sejalan(riasec_dominant, rumpun_dominant)
+        perban_akademik  = self._comparison_text_akademik(
+            sejalan_akademik, riasec_dominant, rumpun_dominant
+        )
 
-        # --- STEP 6: Rata-rata nilai (hanya pelajaran yang diambil, nilai > 0) ---
+        # --- STEP 7: Perbandingan tulisan vs minat (jika ada) ---
+        perban_minat: Optional[Dict] = None
+        sejalan_minat = True   # default True jika tidak ada minat
+        if minat_result:
+            sejalan_minat = (riasec_dominant == minat_result["dominant"])
+            perban_minat  = self._comparison_text_minat(
+                sejalan_minat, riasec_dominant, minat_result["dominant"]
+            )
+
+        # --- STEP 8: Rata-rata nilai (hanya pelajaran yang diambil) ---
         nilai_vals = [v for v in ac.values() if v > 0]
         avg_nilai  = float(np.mean(nilai_vals)) if nilai_vals else 0.0
 
-        # --- STEP 7: Rekomendasi jurusan (3 jika sejalan, 5 jika berbeda) ---
+        # --- STEP 9: Tentukan top_n ---
+        # TOP-3 hanya jika tulisan SEJALAN akademik DAN (tidak ada minat ATAU minat juga sejalan)
+        # TOP-5 jika ada ketidakcocokan apapun
+        semua_konsisten = sejalan_akademik and sejalan_minat
+        top_n = 3 if semua_konsisten else 5
+
+        # --- STEP 10: Rekomendasi jurusan ---
         if self.major_rec is None:
             self.major_rec = MajorRecommender()
 
-        top_n = 3 if sejalan else 5
         rekomendasi = self.major_rec.recommend(
-            riasec_dominant=riasec_dominant,
-            rumpun_ilmu=rumpun_dominant,
-            riasec_proba=riasec_proba,
-            avg_nilai=avg_nilai,
-            top_n=top_n,
-            sejalan=sejalan,
+            riasec_dominant = riasec_dominant,
+            rumpun_ilmu     = rumpun_dominant,
+            riasec_proba    = riasec_proba,
+            avg_nilai       = avg_nilai,
+            top_n           = top_n,
+            sejalan         = sejalan_akademik,
         )
 
-        # --- STEP 8: Top mata pelajaran ---
+        # --- Top mata pelajaran ---
         top_subjects: List[Dict] = []
         if self.rumpun_clf is not None:
             top_subjects = self.rumpun_clf.get_top_subjects(ac, top_n=3)
 
-        # --- STEP 9: Susun output ---
+        # --- Susun output ---
         riasec_desc = RIASEC_DESCRIPTIONS.get(riasec_dominant, {})
 
-        return {
+        result: Dict[str, Any] = {
             "riasec_karakter": {
                 "dominant":   riasec_dominant,
                 "karakter":   riasec_desc.get("karakter", ""),
@@ -199,9 +234,9 @@ class Predictor:
                 "nilai_rata_rata":     round(avg_nilai, 1),
                 "mata_pelajaran_kuat": top_subjects,
             },
-            "perbandingan": {
-                "status":     "SEJALAN" if sejalan else "BERBEDA",
-                "penjelasan": penjelasan,
+            "perbandingan_akademik": {
+                "status":     "SEJALAN" if sejalan_akademik else "BERBEDA",
+                "penjelasan": perban_akademik,
             },
             "rekomendasi_jurusan": rekomendasi,
             "fitur_tulisan": {
@@ -219,6 +254,13 @@ class Predictor:
             "kelengkapan_data": kelengkapan,
         }
 
+        # Tambahkan minat jika ada
+        if minat_result:
+            result["riasec_minat"]      = minat_result
+            result["perbandingan_minat"] = perban_minat
+
+        return result
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -227,11 +269,10 @@ class Predictor:
     ) -> tuple:
         """
         Siapkan nilai akademik dengan default 0.0 untuk yang tidak dikirim.
-        Nilai 0 yang eksplisit dari client TETAP 0 (artinya tidak ambil pelajaran).
+        Nilai 0 eksplisit dari client TETAP 0 (artinya tidak ambil pelajaran).
         """
         all_keys = [
             "mat_s4", "fis_s4", "kim_s4", "bio_s4", "bind_s4", "bing_s4", "info_s4",
-            "mat_s5", "fis_s5", "kim_s5", "bio_s5", "bind_s5", "bing_s5", "info_s5",
         ]
         result: Dict[str, float] = {k: 0.0 for k in all_keys}
         defaults_applied: List[str] = []
@@ -239,7 +280,7 @@ class Predictor:
         if ac:
             for k in all_keys:
                 if k in ac and ac[k] is not None:
-                    result[k] = float(ac[k])   # 0 tetap 0
+                    result[k] = float(ac[k])
                 else:
                     defaults_applied.append(k)
         else:
@@ -247,15 +288,57 @@ class Predictor:
 
         return result, defaults_applied
 
-    def _check_sejalan(self, riasec_dominant: str, rumpun_ilmu: str) -> bool:
-        """Cek apakah tipe RIASEC sejalan dengan Rumpun Ilmu dari nilai akademik."""
-        rumpun_cocok = RIASEC_TO_RUMPUN.get(riasec_dominant, [])
-        return rumpun_ilmu in rumpun_cocok
+    def _compute_minat(self, minat: Dict) -> Dict:
+        """
+        Hitung skor RIASEC dari jawaban kuesioner.
 
-    def _generate_comparison_text(
+        Terima salah satu format:
+          A. 24 jawaban raw: q_R1..q_C4 (0-4 per soal, max 16 per tipe)
+          B. 6 skor langsung: score_R..score_C
+
+        Returns dict berisi dominant, karakter, skor_raw, skor_persen.
+        """
+        codes  = ["R", "I", "A", "S", "E", "C"]
+        scores: Dict[str, float] = {}
+
+        # Deteksi format — prioritaskan format A (raw questions)
+        has_raw = any(f"q_{c}1" in minat for c in codes)
+        if has_raw:
+            for code in codes:
+                total = sum(float(minat.get(f"q_{code}{i}", 0) or 0) for i in range(1, 5))
+                scores[code] = total
+        else:
+            for code in codes:
+                scores[code] = float(minat.get(f"score_{code}", 0) or 0)
+
+        # Dominant = kode dengan skor tertinggi
+        dominant_code = max(scores, key=lambda c: scores[c])
+        dominant_name = _CODE_TO_NAME[dominant_code]
+
+        # Normalisasi ke persen
+        total = sum(scores.values()) or 1.0
+        skor_raw    = {_CODE_TO_NAME[c]: round(scores[c], 1)              for c in codes}
+        skor_persen = {_CODE_TO_NAME[c]: round(scores[c] / total * 100, 1) for c in codes}
+
+        desc = RIASEC_DESCRIPTIONS.get(dominant_name, {})
+        return {
+            "dominant":    dominant_name,
+            "karakter":    desc.get("karakter", ""),
+            "deskripsi":   desc.get("deskripsi", ""),
+            "kekuatan":    desc.get("kekuatan", []),
+            "warna":       desc.get("warna", "#3498DB"),
+            "skor_raw":    skor_raw,
+            "skor_persen": skor_persen,
+        }
+
+    def _check_sejalan(self, riasec_dominant: str, rumpun_ilmu: str) -> bool:
+        """Cek apakah RIASEC tulisan sejalan dengan Rumpun Ilmu akademik."""
+        return rumpun_ilmu in RIASEC_TO_RUMPUN.get(riasec_dominant, [])
+
+    def _comparison_text_akademik(
         self, sejalan: bool, riasec: str, rumpun: str
     ) -> str:
-        """Buat teks penjelasan perbandingan RIASEC vs Rumpun Ilmu."""
+        """Teks perbandingan RIASEC tulisan vs Rumpun Ilmu."""
         karakter = RIASEC_DESCRIPTIONS.get(riasec, {}).get("karakter", riasec)
         if sejalan:
             return (
@@ -263,13 +346,33 @@ class Predictor:
                 f"kecenderungan akademik di bidang {rumpun}. Ini menunjukkan keselarasan "
                 f"antara kepribadianmu dan kemampuan akademik yang kamu miliki."
             )
-        else:
-            return (
-                f"Karakter {karakter} dari analisis tulisan tangan berbeda dengan "
-                f"kecenderungan akademik di bidang {rumpun}. Kondisi ini wajar — "
-                f"banyak siswa berhasil di bidang yang berbeda dari tipe dominan mereka. "
-                f"Rekomendasi berikut mempertimbangkan kedua sisi potensimu."
+        return (
+            f"Karakter {karakter} dari analisis tulisan tangan berbeda dengan "
+            f"kecenderungan akademik di bidang {rumpun}. Kondisi ini wajar — "
+            f"banyak siswa berhasil di bidang yang berbeda dari tipe dominan mereka. "
+            f"Rekomendasi berikut mempertimbangkan kedua sisi potensimu."
+        )
+
+    def _comparison_text_minat(
+        self, sejalan: bool, riasec_tulisan: str, riasec_minat: str
+    ) -> Dict:
+        """Teks perbandingan RIASEC tulisan vs RIASEC kuesioner minat."""
+        k_tulisan = RIASEC_DESCRIPTIONS.get(riasec_tulisan, {}).get("karakter", riasec_tulisan)
+        k_minat   = RIASEC_DESCRIPTIONS.get(riasec_minat,   {}).get("karakter", riasec_minat)
+        if sejalan:
+            penjelasan = (
+                f"Tulisan tanganmu menunjukkan karakter {k_tulisan}, dan kuesioner minat "
+                f"juga mengkonfirmasi hal yang sama. Ini pertanda kuat bahwa profil "
+                f"{riasec_tulisan} adalah karakter dominanmu yang sesungguhnya."
             )
+        else:
+            penjelasan = (
+                f"Tulisan tanganmu menunjukkan karakter {k_tulisan}, namun kuesioner minat "
+                f"menunjukkan kecenderungan {k_minat} ({riasec_minat}). Perbedaan ini wajar — "
+                f"tulisan tangan mencerminkan kepribadian bawah sadar, sedangkan kuesioner "
+                f"mencerminkan minat yang kamu sadari. Rekomendasi mempertimbangkan keduanya."
+            )
+        return {"status": "SEJALAN" if sejalan else "BERBEDA", "penjelasan": penjelasan}
 
     @property
     def is_ready(self) -> bool:

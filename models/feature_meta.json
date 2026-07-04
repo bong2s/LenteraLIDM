@@ -1,6 +1,6 @@
 {
-  "versi": "2.0-dataset-real",
-  "bigfive_model": {
+  "versi": "3.0-riasec-direct",
+  "riasec_model": {
     "feature_cols": [
       "letter_size",
       "slant",
@@ -14,13 +14,14 @@
       "density"
     ],
     "classes": [
-      "Agreeableness",
-      "Conscientiousness",
-      "Extraversion",
-      "Neuroticism",
-      "Openness"
+      "Artistic",
+      "Conventional",
+      "Enterprising",
+      "Investigative",
+      "Realistic",
+      "Social"
     ],
-    "cv_accuracy": 0.4479797979797979
+    "cv_accuracy": 0.9840682788051209
   },
   "rumpun_model": {
     "feature_cols": [
@@ -46,7 +47,7 @@
       "Seni Kreatif",
       "Sosial Humaniora"
     ],
-    "cv_accuracy": 0.5357142857142857
+    "cv_accuracy": 0.5285714285714287
   },
   "major_model": {
     "programs": [
@@ -240,8 +241,16 @@
     }
   },
   "dataset_info": {
-    "n_images": 221,
+    "n_tulisan": 187,
     "n_students": 140,
+    "riasec_distribution": {
+      "Artistic": 76,
+      "Investigative": 36,
+      "Social": 30,
+      "Conventional": 27,
+      "Realistic": 10,
+      "Enterprising": 8
+    },
     "rumpun_distribution": {
       "STEM": 56,
       "Sosial Humaniora": 32,

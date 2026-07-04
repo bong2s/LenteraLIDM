@@ -1,17 +1,18 @@
 {
   "status": "SUCCESS",
-  "bigfive_model": {
+  "riasec_model": {
     "classes": [
-      "Agreeableness",
-      "Conscientiousness",
-      "Extraversion",
-      "Neuroticism",
-      "Openness"
+      "Artistic",
+      "Conventional",
+      "Enterprising",
+      "Investigative",
+      "Realistic",
+      "Social"
     ],
-    "n_samples": 221,
-    "cv_accuracy_mean": 0.4479797979797979,
-    "cv_accuracy_std": 0.05638951652317094,
-    "train_accuracy": 0.9909411915767847
+    "n_samples": 187,
+    "cv_accuracy_mean": 0.9840682788051209,
+    "cv_accuracy_std": 0.02112555131236072,
+    "train_accuracy": 1.0
   },
   "rumpun_model": {
     "classes": [
@@ -22,13 +23,13 @@
       "Sosial Humaniora"
     ],
     "n_samples": 140,
-    "cv_accuracy_mean": 0.5357142857142857,
-    "cv_accuracy_std": 0.06776309271789382,
+    "cv_accuracy_mean": 0.5285714285714287,
+    "cv_accuracy_std": 0.03499271061118824,
     "train_accuracy": 1.0
   },
   "major_programs": 70,
   "saved": {
-    "bigfive": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\bigfive_model.pkl",
+    "riasec": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\riasec_model.pkl",
     "rumpun": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\rumpun_model.pkl",
     "major": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\major_model.pkl"
   }
