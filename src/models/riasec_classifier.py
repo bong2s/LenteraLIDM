@@ -12,7 +12,7 @@ Dua classifier utama:
      Dataset: 235 baris CSV dengan label riasec_primary
 
   2. RumpunClassifier
-     Input : 14 nilai akademik (2 semester)
+     Input : 7 nilai akademik (rata-rata Semester 4 & 5)
      Output: Rumpun Ilmu (STEM / Sosial Humaniora /
              Bisnis Manajemen / Pendidikan / Seni Kreatif)
      Dataset: 140 data akademik
@@ -170,37 +170,33 @@ class RiasecClassifier:
 
 class RumpunClassifier:
     """
-    Memprediksi Rumpun Ilmu dari nilai akademik 2 semester.
+    Memprediksi Rumpun Ilmu dari nilai akademik 7 mata pelajaran
+    (rata-rata Semester 4 & 5, dihitung sekali di data_loader).
 
-    Input : dict dengan 14 key (mat_s4, fis_s4, ..., info_s5)
+    Input : dict dengan 7 key (mat, fis, kim, bio, bind, bing, info)
             Nilai 0 = siswa tidak ambil pelajaran → TETAP 0
     Output: 'STEM' | 'Sosial Humaniora' | 'Bisnis Manajemen' |
             'Pendidikan' | 'Seni Kreatif'
     """
 
     FEATURES = [
-        "mat_s4", "fis_s4", "kim_s4", "bio_s4", "bind_s4", "bing_s4", "info_s4",
-        "mat_s5", "fis_s5", "kim_s5", "bio_s5", "bind_s5", "bing_s5", "info_s5",
+        "mat", "fis", "kim", "bio", "bind", "bing", "info",
     ]
 
     FEATURE_LABELS = {
-        "mat_s4":  "Matematika Smt 4",   "fis_s4":  "Fisika Smt 4",
-        "kim_s4":  "Kimia Smt 4",        "bio_s4":  "Biologi Smt 4",
-        "bind_s4": "B. Indonesia Smt 4", "bing_s4": "B. Inggris Smt 4",
-        "info_s4": "Informatika Smt 4",  "mat_s5":  "Matematika Smt 5",
-        "fis_s5":  "Fisika Smt 5",       "kim_s5":  "Kimia Smt 5",
-        "bio_s5":  "Biologi Smt 5",      "bind_s5": "B. Indonesia Smt 5",
-        "bing_s5": "B. Inggris Smt 5",   "info_s5": "Informatika Smt 5",
+        "mat":  "Matematika",   "fis":  "Fisika",
+        "kim":  "Kimia",        "bio":  "Biologi",
+        "bind": "B. Indonesia", "bing": "B. Inggris",
+        "info": "Informatika",
     }
 
     # Mata pelajaran kunci per rumpun (heuristik fallback)
     RUMPUN_KEY_SUBJECTS = {
-        "STEM":             ["mat_s4", "mat_s5", "fis_s4", "fis_s5",
-                             "kim_s4", "kim_s5", "info_s4", "info_s5"],
-        "Sosial Humaniora": ["bind_s4", "bind_s5", "bing_s4", "bing_s5"],
-        "Bisnis Manajemen": ["mat_s4", "mat_s5", "bing_s4", "bing_s5"],
-        "Pendidikan":       ["bind_s4", "bind_s5", "bio_s4", "bio_s5"],
-        "Seni Kreatif":     ["bing_s4", "bing_s5", "bind_s4"],
+        "STEM":             ["mat", "fis", "kim", "info"],
+        "Sosial Humaniora": ["bind", "bing"],
+        "Bisnis Manajemen": ["mat", "bing"],
+        "Pendidikan":       ["bind", "bio"],
+        "Seni Kreatif":     ["bing", "bind"],
     }
 
     def __init__(self):

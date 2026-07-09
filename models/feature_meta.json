@@ -21,24 +21,17 @@
       "Realistic",
       "Social"
     ],
-    "cv_accuracy": 0.9840682788051209
+    "cv_accuracy": 0.9786628733997155
   },
   "rumpun_model": {
     "feature_cols": [
-      "mat_s4",
-      "fis_s4",
-      "kim_s4",
-      "bio_s4",
-      "bind_s4",
-      "bing_s4",
-      "info_s4",
-      "mat_s5",
-      "fis_s5",
-      "kim_s5",
-      "bio_s5",
-      "bind_s5",
-      "bing_s5",
-      "info_s5"
+      "mat",
+      "fis",
+      "kim",
+      "bio",
+      "bind",
+      "bing",
+      "info"
     ],
     "classes": [
       "Bisnis Manajemen",
@@ -47,7 +40,7 @@
       "Seni Kreatif",
       "Sosial Humaniora"
     ],
-    "cv_accuracy": 0.5285714285714287
+    "cv_accuracy": 0.5
   },
   "major_model": {
     "programs": [

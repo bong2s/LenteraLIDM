@@ -5,12 +5,13 @@ MODUL: data_loader.py  (Dataset Real v3 — RIASEC Direct)
 Dataset yang digunakan:
   1. Dataset_TulisanN.csv  — 235 baris fitur tulisan tangan (pra-ekstraksi)
      Target: riasec_primary (kode huruf R/I/A/S/E/C)
-  2. Dataset_AkademikN.xlsx — 140 siswa, 14 nilai pelajaran (2 semester)
+  2. Dataset_AkademikN.xlsx — 140 siswa, 14 nilai pelajaran (2 semester),
+     digabung menjadi 7 nilai (rata-rata Smt 4 & 5) sebagai fitur model.
      Target: Rumpun Ilmu (5 kategori) + Program Studi
 
 Arsitektur ML:
   CSV fitur tulisan → RiasecClassifier (10 fitur → RIASEC langsung)
-  Akademik          → RumpunClassifier (14 nilai → Rumpun Ilmu)
+  Akademik          → RumpunClassifier (7 nilai rata-rata → Rumpun Ilmu)
   Perbandingan RIASEC vs Rumpun → sejalan / berbeda
 =============================================================
 """
@@ -152,6 +153,37 @@ CSV_FEATURE_COLS: Dict[str, str] = {
     "line_straightness":  "baseline",
     "density_score":      "density",
 }
+
+
+# ------------------------------------------------------------------
+# 7 Mapel (rata-rata Semester 4 & 5) — dipakai sebagai fitur RumpunClassifier
+# ------------------------------------------------------------------
+AKADEMIK_S4_S5_PAIRS: Dict[str, Tuple[str, str]] = {
+    "mat":  ("mat_s4",  "mat_s5"),
+    "fis":  ("fis_s4",  "fis_s5"),
+    "kim":  ("kim_s4",  "kim_s5"),
+    "bio":  ("bio_s4",  "bio_s5"),
+    "bind": ("bind_s4", "bind_s5"),
+    "bing": ("bing_s4", "bing_s5"),
+    "info": ("info_s4", "info_s5"),
+}
+
+
+def _rata_rata_semester(nilai_s4: float, nilai_s5: float) -> float:
+    """
+    Hitung rata-rata nilai semester 4 & 5 untuk satu mata pelajaran.
+
+    Nilai 0 berarti "tidak mengambil pelajaran ini" pada semester tsb,
+    sehingga TIDAK ikut dirata-rata (supaya nilai tidak timpang jika
+    mapel hanya diambil di salah satu semester):
+      - keduanya > 0  → rata-rata biasa
+      - salah satu 0  → pakai nilai yang > 0 saja
+      - keduanya 0    → hasil 0 (mapel memang tidak diambil)
+    """
+    vals = [v for v in (nilai_s4, nilai_s5) if v and v > 0]
+    if not vals:
+        return 0.0
+    return sum(vals) / len(vals)
 
 
 def _norm_program_studi(nama: str) -> str:
@@ -309,13 +341,33 @@ class DatasetLoader:
         for col in num_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
+        # ------------------------------------------------------------
+        # Gabungkan Semester 4 & 5 menjadi rata-rata per mata pelajaran
+        # (hanya 7 mapel yang akan diinput user, tanpa split semester).
+        # PENTING: nilai 0 = "tidak ambil pelajaran". Agar rata-rata tidak
+        # timpang saat mapel hanya diambil di salah satu semester, rata-rata
+        # dihitung hanya dari nilai yang > 0. Jika keduanya 0 → tetap 0.
+        # ------------------------------------------------------------
+        for mapel, (col_s4, col_s5) in AKADEMIK_S4_S5_PAIRS.items():
+            if col_s4 in df.columns and col_s5 in df.columns:
+                df[mapel] = df.apply(
+                    lambda row: _rata_rata_semester(row[col_s4], row[col_s5]),
+                    axis=1,
+                )
+            elif col_s4 in df.columns:
+                df[mapel] = df[col_s4]
+            elif col_s5 in df.columns:
+                df[mapel] = df[col_s5]
+            else:
+                df[mapel] = 0.0
+
+        # Kolom semester 4/5 asli tidak lagi dibutuhkan sebagai fitur model,
+        # tapi dibiarkan ada di DataFrame (tidak dihapus) untuk keperluan lain.
+
         logger.info(f"Akademik: {df.shape[0]} siswa, Rumpun: {df['rumpun_ilmu'].value_counts().to_dict()}")
         return df
 
     @property
     def akademik_feature_cols(self) -> List[str]:
-        """Daftar kolom fitur akademik (bukan target)."""
-        return [
-            "mat_s4", "fis_s4", "kim_s4", "bio_s4", "bind_s4", "bing_s4", "info_s4",
-            "mat_s5", "fis_s5", "kim_s5", "bio_s5", "bind_s5", "bing_s5", "info_s5",
-        ]
+        """Daftar kolom fitur akademik (bukan target) — 7 mapel (rata-rata smt 4 & 5)."""
+        return ["mat", "fis", "kim", "bio", "bind", "bing", "info"]

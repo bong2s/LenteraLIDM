@@ -10,8 +10,8 @@
       "Social"
     ],
     "n_samples": 187,
-    "cv_accuracy_mean": 0.9840682788051209,
-    "cv_accuracy_std": 0.02112555131236072,
+    "cv_accuracy_mean": 0.9786628733997155,
+    "cv_accuracy_std": 0.01977189229461629,
     "train_accuracy": 1.0
   },
   "rumpun_model": {
@@ -23,14 +23,14 @@
       "Sosial Humaniora"
     ],
     "n_samples": 140,
-    "cv_accuracy_mean": 0.5285714285714287,
-    "cv_accuracy_std": 0.03499271061118824,
+    "cv_accuracy_mean": 0.5,
+    "cv_accuracy_std": 0.095831484749991,
     "train_accuracy": 1.0
   },
   "major_programs": 70,
   "saved": {
-    "riasec": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\riasec_model.pkl",
-    "rumpun": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\rumpun_model.pkl",
-    "major": "C:\\Users\\slim3\\OneDrive\\Documents\\Lentera LIDM\\models\\major_model.pkl"
+    "riasec": "/home/claude/LenteraLIDM/LenteraLIDM/models/riasec_model.pkl",
+    "rumpun": "/home/claude/LenteraLIDM/LenteraLIDM/models/rumpun_model.pkl",
+    "major": "/home/claude/LenteraLIDM/LenteraLIDM/models/major_model.pkl"
   }
 }

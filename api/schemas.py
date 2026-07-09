@@ -29,26 +29,18 @@ from pydantic import BaseModel, Field
 
 class AkademikInput(BaseModel):
     """
-    Nilai akademik 14 mata pelajaran (Semester 4 dan 5).
+    Nilai akademik 7 mata pelajaran.
+    Nilai yang diinput adalah RATA-RATA dari Semester 4 dan 5 (dihitung oleh
+    pengguna/frontend sebelum dikirim ke API).
     Semua opsional — nilai 0 / None dianggap 'tidak ambil pelajaran ini'.
     """
-    # Semester 4
-    mat_s4:  Optional[float] = Field(None, ge=0, le=100, description="Matematika Semester 4")
-    fis_s4:  Optional[float] = Field(None, ge=0, le=100, description="Fisika Semester 4")
-    kim_s4:  Optional[float] = Field(None, ge=0, le=100, description="Kimia Semester 4")
-    bio_s4:  Optional[float] = Field(None, ge=0, le=100, description="Biologi Semester 4")
-    bind_s4: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Indonesia Semester 4")
-    bing_s4: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Inggris Semester 4")
-    info_s4: Optional[float] = Field(None, ge=0, le=100, description="Informatika Semester 4")
-
-    # Semester 5
-    mat_s5:  Optional[float] = Field(None, ge=0, le=100, description="Matematika Semester 5")
-    fis_s5:  Optional[float] = Field(None, ge=0, le=100, description="Fisika Semester 5")
-    kim_s5:  Optional[float] = Field(None, ge=0, le=100, description="Kimia Semester 5")
-    bio_s5:  Optional[float] = Field(None, ge=0, le=100, description="Biologi Semester 5")
-    bind_s5: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Indonesia Semester 5")
-    bing_s5: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Inggris Semester 5")
-    info_s5: Optional[float] = Field(None, ge=0, le=100, description="Informatika Semester 5")
+    mat:  Optional[float] = Field(None, ge=0, le=100, description="Matematika (rata-rata Smt 4 & 5)")
+    fis:  Optional[float] = Field(None, ge=0, le=100, description="Fisika (rata-rata Smt 4 & 5)")
+    kim:  Optional[float] = Field(None, ge=0, le=100, description="Kimia (rata-rata Smt 4 & 5)")
+    bio:  Optional[float] = Field(None, ge=0, le=100, description="Biologi (rata-rata Smt 4 & 5)")
+    bind: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Indonesia (rata-rata Smt 4 & 5)")
+    bing: Optional[float] = Field(None, ge=0, le=100, description="Bahasa Inggris (rata-rata Smt 4 & 5)")
+    info: Optional[float] = Field(None, ge=0, le=100, description="Informatika (rata-rata Smt 4 & 5)")
 
     def to_dict(self) -> Dict[str, float]:
         d = self.model_dump()
@@ -198,7 +190,7 @@ class PredictResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status:       str  = Field(description="'ok' jika server berjalan normal")
-    model_loaded: bool = Field(description="True jika semua model sudah dimuat")
+    is_model_loaded: bool = Field(description="True jika semua model sudah dimuat")
     version:      str  = Field(default="3.0.0")
 
 

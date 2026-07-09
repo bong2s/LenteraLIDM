@@ -118,7 +118,7 @@ class Predictor:
 
         Args:
             image_bytes     : bytes gambar tulisan tangan (jpg/png)
-            academic_scores : nilai akademik 14 mapel (opsional)
+            academic_scores : nilai akademik 7 mapel, rata-rata smt 4 & 5 (opsional)
             minat_scores    : jawaban kuesioner RIASEC (opsional)
                 Format A — 24 jawaban: {"q_R1":3,"q_R2":2,...,"q_C4":3}
                 Format B — 6 skor:     {"score_R":11,"score_I":12,...}
@@ -272,7 +272,7 @@ class Predictor:
         Nilai 0 eksplisit dari client TETAP 0 (artinya tidak ambil pelajaran).
         """
         all_keys = [
-            "mat_s4", "fis_s4", "kim_s4", "bio_s4", "bind_s4", "bing_s4", "info_s4",
+            "mat", "fis", "kim", "bio", "bind", "bing", "info",
         ]
         result: Dict[str, float] = {k: 0.0 for k in all_keys}
         defaults_applied: List[str] = []

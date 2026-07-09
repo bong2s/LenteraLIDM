@@ -6,15 +6,14 @@ Endpoint utama yang diterima dari website Laravel.
 
 Menerima (multipart/form-data):
   - file     : gambar tulisan tangan (jpg/png, maks 10MB)
-  - akademik : JSON nilai 14 mata pelajaran (opsional)
+  - akademik : JSON nilai 7 mata pelajaran, rata-rata Smt 4 & 5 (opsional)
   - minat    : JSON jawaban 24 soal RIASEC atau 6 skor (opsional)
 
 CONTOH LARAVEL — kirim semua:
   $response = Http::attach('file', file_get_contents($path), 'tulisan.jpg')
       ->post('http://localhost:8000/predict', [
           'akademik' => json_encode([
-              'mat_s4' => 90, 'fis_s4' => 85, 'info_s4' => 95,
-              'mat_s5' => 88, 'info_s5' => 92,
+              'mat' => 89, 'fis' => 85, 'info' => 93.5,
           ]),
           'minat' => json_encode([
               'q_R1'=>2,'q_R2'=>3,'q_R3'=>2,'q_R4'=>1,
@@ -42,7 +41,7 @@ from fastapi import APIRouter, File, Form, UploadFile, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from api.schemas import (
-    PredictResponse, AkademikInput,
+    PredictResponse, AkademikInput, MinatInput,
     build_predict_response,
 )
 
@@ -68,8 +67,8 @@ async def predict_handwriting(
     akademik: Optional[str] = Form(
         None,
         description=(
-            "JSON nilai 14 mata pelajaran (opsional). "
-            'Contoh: {"mat_s4":90,"fis_s4":85,"info_s4":95,"mat_s5":88,"info_s5":92}'
+            "JSON nilai 7 mata pelajaran, sudah dirata-rata Smt 4 & 5 (opsional). "
+            'Contoh: {"mat":89,"fis":85,"info":93.5}'
         ),
     ),
     minat: Optional[str] = Form(
@@ -223,9 +222,9 @@ async def predict_demo():
                                     "Sosial Humaniora": 10.5, "Pendidikan": 6.0, "Seni Kreatif": 3.0},
             "nilai_rata_rata": 88.5,
             "mata_pelajaran_kuat": [
-                {"mata_pelajaran": "Informatika Smt 5", "nilai": 95.0},
-                {"mata_pelajaran": "Matematika Smt 5",  "nilai": 92.0},
-                {"mata_pelajaran": "Matematika Smt 4",  "nilai": 90.0},
+                {"mata_pelajaran": "Informatika", "nilai": 93.5},
+                {"mata_pelajaran": "Matematika",  "nilai": 91.0},
+                {"mata_pelajaran": "Fisika",       "nilai": 87.0},
             ],
         },
         "perbandingan_akademik": {
